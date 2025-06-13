@@ -5,6 +5,7 @@ A comprehensive Point of Sale (POS) system designed specifically for coffee shop
 ## 📋 Table of Contents
 
 - [Overview](#overview)
+- [Project Structure](#project-structure)
 - [Database Architecture](#database-architecture)
 - [Table Reference](#table-reference)
 - [Features](#features)
@@ -30,6 +31,145 @@ This PostgreSQL database schema powers a modern café POS system with **30 core 
 - **60+ Indexes**: Sub-second query performance
 - **Multi-Currency**: 9 supported currencies with real-time conversion
 - **Multi-Branch**: Centralized or independent inventory strategies
+
+## 📁 Project Structure
+
+The project is organized into logical groups based on functionality and purpose:
+
+### 🗄️ **Core Database Schema**
+
+```
+📊 Core Schema Files
+├── my.sql                          # 🎯 Main database schema (30 tables, functions, views)
+├── my_postgresql.sql               # 📋 Alternative PostgreSQL-optimized version
+└── postgresql_sample_data.sql      # 🎲 Sample data for testing and demos
+```
+
+### 🏢 **Multi-Branch System**
+
+```
+🏢 Multi-Branch Architecture
+├── MULTI_BRANCH_ARCHITECTURE.md    # 📖 Architecture design and strategies
+├── MULTI_BRANCH_DEPLOYMENT.md     # 🚀 Deployment guide for multi-branch
+├── multi_branch_implementation.sql # 💻 Multi-branch feature implementation
+├── multi_branch_integration_test.sql # 🧪 Integration testing suite
+├── multi_branch_test_suite.sql    # ✅ Comprehensive test coverage
+└── MULTI_BRANCH_INTEGRATION_COMPLETE.md # 📋 Implementation status
+```
+
+### 💰 **Currency & Financial System**
+
+```
+💱 Currency Management
+├── CURRENCY_UPDATE.md              # 📝 Currency system documentation
+├── multi_currency_examples.sql    # 💡 Usage examples and demos
+└── currency_flexibility_test.sql  # 🧪 Currency conversion testing
+```
+
+### 🔐 **Security & Permissions**
+
+```
+🔐 Permission System
+├── PERMISSION_SYSTEM_GUIDE.md     # 📖 Permission system guide
+├── PERMISSION_SYSTEM_COMPLETE.md  # ✅ Implementation status
+├── permission_system_test.sql     # 🧪 Permission testing suite
+└── validate_permission_system.py  # 🔍 Python validation script
+```
+
+### 🎯 **Product Management**
+
+```
+🛍️ Product & Variation System
+├── PRODUCT_VARIATION_DESIGN_GUIDE.md # 📖 Design patterns and best practices
+├── product_variation_enhancement.sql # ⚡ Enhanced variation features
+├── test_product_variations.sql    # 🧪 Product variation testing
+├── SUGAR_LEVEL_GUIDE.md           # 🍯 Sugar level customization guide
+├── SUGAR_LEVEL_DEPLOYMENT.md      # 🚀 Sugar level feature deployment
+└── sugar_level_test.sql           # 🧪 Sugar level testing suite
+```
+
+### 📊 **Performance & Optimization**
+
+```
+⚡ Performance & Analytics
+├── performance_analysis.sql       # 📈 Performance optimization analysis
+├── table_dependency_analysis.sql  # 🔗 Table relationship analysis
+├── table_order_validation_report.md # 📋 Dependency validation report
+└── dependency_fix_verification.md # ✅ Dependency fixes verification
+```
+
+### 🧪 **Testing & Validation**
+
+```
+🔬 Testing & Quality Assurance
+├── test_schema.sql                # 🧪 Basic schema testing
+├── test_complete_integration.sql  # 🔧 Full system integration tests
+├── integration_test.sql           # 🔄 Core integration testing
+├── integration_validation.sql     # ✅ Validation test suite
+├── schema_validation_test.sql     # 📊 Schema structure validation
+├── validate_table_dependencies.sql # 🔗 Dependency validation
+├── validate_dependencies.py       # 🐍 Python dependency checker
+├── validate_schema.py            # 🐍 Python schema validator
+└── schema_check.py               # 🐍 Schema integrity checker
+```
+
+### 📚 **Documentation & Guides**
+
+```
+📖 Documentation & Project Management
+├── README.md                      # 📘 Main project documentation (this file)
+├── DEPLOYMENT_GUIDE.md           # 🚀 Production deployment guide
+├── PROJECT_STATUS.md             # 📊 Current project status
+├── PROJECT_COMPLETION_SUMMARY.md # ✅ Project completion overview
+├── COMPLETION_SUMMARY.md         # 📋 Feature completion summary
+└── INTEGRATION_SUMMARY.md        # 🔄 System integration summary
+```
+
+### 🎯 **File Purpose Guide**
+
+| File Type          | Purpose                 | When to Use                                          |
+| ------------------ | ----------------------- | ---------------------------------------------------- |
+| **`.sql` files**   | Database implementation | Execute for schema setup, testing, or features       |
+| **`.md` files**    | Documentation & guides  | Read for understanding, planning, or troubleshooting |
+| **`.py` files**    | Validation & automation | Run for schema validation and dependency checking    |
+| **`*_test.sql`**   | Testing suites          | Execute to verify functionality after changes        |
+| **`*_GUIDE.md`**   | Implementation guides   | Reference during feature development                 |
+| **`*_SUMMARY.md`** | Status & completion     | Track project progress and milestones                |
+
+### 🚀 **Quick Start Files**
+
+For different use cases, start with these files:
+
+**🏁 New Installation:**
+
+```bash
+1. my.sql                    # Main schema
+2. postgresql_sample_data.sql # Sample data
+3. test_complete_integration.sql # Verify setup
+```
+
+**🏢 Multi-Branch Setup:**
+
+```bash
+1. multi_branch_implementation.sql # Multi-branch features
+2. multi_branch_integration_test.sql # Test multi-branch
+3. MULTI_BRANCH_DEPLOYMENT.md # Deployment guide
+```
+
+**🧪 Testing & Validation:**
+
+```bash
+1. test_schema.sql          # Basic tests
+2. integration_validation.sql # Full validation
+3. validate_schema.py       # Python validation
+```
+
+**📈 Performance Optimization:**
+
+```bash
+1. performance_analysis.sql # Performance insights
+2. table_dependency_analysis.sql # Optimization opportunities
+```
 
 ## 🏗️ Database Architecture
 
