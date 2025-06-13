@@ -575,8 +575,6 @@ VALUES (1, 25.0, 'restock', 1, 'Weekly coffee bean delivery');
 
 For issues, feature requests, or questions:
 
-- 📧 Email: support@cafe-pos.com
-- 📚 Documentation: [Full API Reference](docs/api.md)
 - 🐛 Issues: [GitHub Issues](https://github.com/cafe-pos/issues)
 
 ---
