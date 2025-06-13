@@ -440,8 +440,8 @@ SELECT * FROM inventory_transfers WHERE transfer_status = 'pending';
 
 ### 🌍 **Supported Currencies**
 
-- **USD**: US Dollar (Base currency)
-- **LAK**: Lao Kip
+- **LAK**: Lao Kip (Base currency)
+- **USD**: US Dollar
 - **THB**: Thai Baht
 - **EUR**: Euro
 - **JPY**: Japanese Yen
