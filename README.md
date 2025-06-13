@@ -40,7 +40,7 @@ The project is organized into logical groups based on functionality and purpose:
 
 ```
 📊 Core Schema Files
-├── my.sql                          # 🎯 Main database schema (30 tables, functions, views)
+├── cafe_pos.sql                          # 🎯 Main database schema (30 tables, functions, views)
 ├── my_postgresql.sql               # 📋 Alternative PostgreSQL-optimized version
 └── postgresql_sample_data.sql      # 🎲 Sample data for testing and demos
 ```
@@ -143,7 +143,7 @@ For different use cases, start with these files:
 **🏁 New Installation:**
 
 ```bash
-1. my.sql                    # Main schema
+1. cafe_pos.sql                    # Main schema
 2. postgresql_sample_data.sql # Sample data
 3. test_complete_integration.sql # Verify setup
 ```
@@ -355,7 +355,7 @@ createdb cafe_pos_system
 2. **Execute Schema**
 
 ```bash
-psql -d cafe_pos_system -f my.sql
+psql -d cafe_pos_system -f cafe_pos.sql
 ```
 
 3. **Verify Installation**
