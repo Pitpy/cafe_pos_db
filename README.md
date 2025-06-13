@@ -518,16 +518,17 @@ REINDEX DATABASE cafe_pos_system;
 ### Basic Order Flow
 
 ```sql
--- 1. Create order
-INSERT INTO orders (order_number, employee_id, customer_id, branch_id,
-                   currency_code, subtotal, tax_rate, tax_amount, total_amount, base_total_amount)
-VALUES ('CAFE-2025-001', 1, 1, 1, 'USD', 4.50, 8.5, 0.38, 4.88, 4.88);
+-- 1. Create order (must include order_time)
+INSERT INTO orders (order_number, employee_id, customer_id, branch_id, order_time,
+                   currency_code, exchange_rate, subtotal, tax_rate, tax_amount,
+                   total_amount, base_total_amount, status)
+VALUES ('CAFE-2025-001', 1, 1, 1, CURRENT_TIMESTAMP, 'USD', 1.0, 4.50, 8.5, 0.38, 4.88, 4.88, 'open');
 
 -- 2. Add order items
 INSERT INTO order_items (order_id, variation_id, quantity, base_unit_price, display_unit_price, modifiers)
 VALUES (1, 1, 1, 4.50, 4.50, '{"sugar_level": "regular", "whipped_cream": true}');
 
--- 3. Process payment
+-- 3. Process payment (status defaults to 'completed')
 INSERT INTO order_payments (order_id, method_id, currency_code, amount, base_amount, exchange_rate)
 VALUES (1, 1, 'USD', 4.88, 4.88, 1.0);
 
@@ -545,9 +546,96 @@ FROM recipes r
 JOIN ingredients i ON r.ingredient_id = i.ingredient_id
 WHERE r.variation_id = 1; -- Large Hot Latte
 
--- Restock ingredient
+-- Restock ingredient (using proper column names)
 INSERT INTO inventory_transactions (ingredient_id, change, transaction_type, branch_id, notes)
 VALUES (1, 25.0, 'restock', 1, 'Weekly coffee bean delivery');
+```
+
+### Product Variation Management
+
+```sql
+-- Create a new product variation with flexible variant system
+INSERT INTO product_variations (product_id, price, cost, sku, is_available)
+VALUES (1, 5.50, 1.50, 'LAT-MD-HOT', true);
+
+-- Link variation to specific options (size, temperature, etc.)
+INSERT INTO variation_options (variation_id, option_id) VALUES
+(CURRVAL('product_variations_variation_id_seq'),
+ (SELECT option_id FROM variant_options WHERE value = 'medium')),
+(CURRVAL('product_variations_variation_id_seq'),
+ (SELECT option_id FROM variant_options WHERE value = 'hot'));
+
+-- Get all options for a variation
+SELECT get_variation_options(1);
+```
+
+### Multi-Currency Operations
+
+```sql
+-- Convert currency amounts
+SELECT convert_currency(4.50, 'USD', 'LAK') as lak_amount;
+
+-- Format currency for display
+SELECT format_currency(4.50, 'USD') as formatted_usd,
+       format_currency(94500, 'LAK') as formatted_lak;
+
+-- Order in different currency
+INSERT INTO orders (order_number, employee_id, branch_id, order_time,
+                   currency_code, exchange_rate, subtotal, tax_rate, tax_amount,
+                   total_amount, base_total_amount)
+VALUES ('CAFE-2025-002', 1, 1, CURRENT_TIMESTAMP, 'LAK', 21000.0,
+        94500.00, 8.5, 8032.50, 102532.50, 4.88);
+```
+
+### Sugar Level Customization
+
+```sql
+-- Order with different sugar levels
+INSERT INTO order_items (order_id, variation_id, quantity, base_unit_price, display_unit_price, modifiers) VALUES
+(1, 1, 1, 4.50, 4.50, '{"sugar_level": "no_sugar"}'),
+(1, 2, 1, 5.50, 5.50, '{"sugar_level": "extra_sweet", "whipped_cream": true}'),
+(1, 3, 1, 3.50, 3.50, '{"sugar_level": "less_sugar", "oat_milk": true}');
+
+-- Calculate price adjustment for sugar level
+SELECT calculate_sugar_price_adjustment(4.50, 'no_sugar') as adjusted_price;
+
+-- View sugar level preferences
+SELECT * FROM sugar_level_preferences;
+```
+
+### Multi-Branch Operations
+
+```sql
+-- Transfer inventory between branches
+INSERT INTO inventory_transfers (from_branch_id, to_branch_id, ingredient_id,
+                               quantity_requested, requested_by, request_date)
+VALUES (1, 2, 1, 5.0, 1, CURRENT_TIMESTAMP);
+
+-- Check branch inventory status
+SELECT * FROM branch_inventory_status WHERE branch_id = 1;
+
+-- Verify employee branch access
+SELECT employee_can_access_branch(1, 2) as can_access;
+
+-- Check if branch is open
+SELECT is_branch_open(1, CURRENT_TIME, EXTRACT(DOW FROM CURRENT_DATE)::INTEGER) as is_open;
+```
+
+### Permission System
+
+```sql
+-- Check employee permissions
+SELECT employee_has_permission(1, 'PROCESS_REFUND') as can_refund;
+
+-- Assign role to employee
+INSERT INTO employee_roles (employee_id, role_id, assigned_by)
+VALUES (2, 1, 1); -- Assign manager role to employee 2
+
+-- Grant permission to role
+INSERT INTO role_permissions (role_id, permission_id, granted_by)
+SELECT 1, permission_id, 1
+FROM permissions
+WHERE code = 'MANAGE_INVENTORY';
 ```
 
 ## 📋 ENUM Types Reference
