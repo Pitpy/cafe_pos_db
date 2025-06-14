@@ -20,17 +20,18 @@ A comprehensive Point of Sale (POS) system designed specifically for coffee shop
 
 ## 🎯 Overview
 
-This PostgreSQL database schema powers a modern café POS system with **30 core tables**, supporting everything from simple coffee orders to complex multi-branch operations with real-time inventory tracking and multi-currency transactions.
+This PostgreSQL database schema powers a modern café POS system with **31 core tables**, supporting everything from simple coffee orders to complex multi-branch operations with real-time inventory tracking, flexible member benefits, and multi-currency transactions.
 
 ### 🚀 Quick Stats _(Recently Enhanced)_
 
-- **30 Tables**: Complete business logic coverage
+- **31 Tables**: Complete business logic coverage including member benefits
 - **9 Custom ENUM Types**: Type-safe operations
 - **20+ Helper Functions**: Business logic automation
 - **6 Views & Materialized Views**: Optimized reporting
 - **80+ Advanced Indexes**: Enterprise-grade performance ⚡
 - **Multi-Currency**: 9 supported currencies with real-time conversion
 - **Multi-Branch**: Centralized or independent inventory strategies
+- **Member Benefits**: Flexible reward system with discounts, free items, and point multipliers
 - **JSONB Support**: Advanced customization and modifiers
 - **Permission System**: Role-based security with 15+ permissions
 - **Real-time Performance**: Sub-10ms query response times
@@ -207,6 +208,13 @@ For different use cases, start with these files:
 - **Tax Management**: Branch-specific tax rates
 - **Reporting**: Daily sales, performance metrics
 
+#### 🎁 Member Benefits & Loyalty
+
+- **Flexible Benefit Types**: Discounts, free items, point multipliers
+- **Membership Tiers**: Guest, Member, VIP support
+- **Product-Specific Rewards**: Free items tied to specific products
+- **Configurable Values**: Percentage discounts and multiplier rates
+
 #### 🔐 Security & Access Control
 
 - **Role-Based Permissions**: Granular access control
@@ -249,31 +257,32 @@ For different use cases, start with these files:
 
 ### 4. **Inventory Management Tables**
 
-| #   | Table                    | Purpose                | Key Features                 |
-| --- | ------------------------ | ---------------------- | ---------------------------- |
-| 18  | `ingredients`            | Raw materials          | Stock levels, suppliers      |
-| 19  | `recipes`                | Product ingredients    | Quantity requirements        |
-| 20  | `inventory_transactions` | Stock movements        | Sales deductions, restocking |
-| 21  | `central_inventory`      | Centralized stock      | Allocation tracking          |
-| 22  | `branch_inventory`       | Branch-specific stock  | Reorder thresholds           |
-| 23  | `inventory_transfers`    | Inter-branch movements | Approval workflow            |
+| #   | Table                    | Purpose                | Key Features                                     |
+| --- | ------------------------ | ---------------------- | ------------------------------------------------ |
+| 18  | `member_benefits`        | Member reward system   | Flexible benefit types, product-specific rewards |
+| 19  | `ingredients`            | Raw materials          | Stock levels, suppliers                          |
+| 20  | `recipes`                | Product ingredients    | Quantity requirements                            |
+| 21  | `inventory_transactions` | Stock movements        | Sales deductions, restocking                     |
+| 22  | `central_inventory`      | Centralized stock      | Allocation tracking                              |
+| 23  | `branch_inventory`       | Branch-specific stock  | Reorder thresholds                               |
+| 24  | `inventory_transfers`    | Inter-branch movements | Approval workflow                                |
 
 ### 5. **Multi-Currency Tables**
 
 | #   | Table                   | Purpose              | Key Features                   |
 | --- | ----------------------- | -------------------- | ------------------------------ |
-| 24  | `currencies`            | Supported currencies | 9 currencies, decimal handling |
-| 25  | `exchange_rates`        | Current rates        | Real-time updates              |
-| 26  | `exchange_rate_history` | Rate tracking        | Historical data                |
+| 25  | `currencies`            | Supported currencies | 9 currencies, decimal handling |
+| 26  | `exchange_rates`        | Current rates        | Real-time updates              |
+| 27  | `exchange_rate_history` | Rate tracking        | Historical data                |
 
 ### 6. **Security & Permissions Tables**
 
 | #   | Table               | Purpose                   | Key Features                |
 | --- | ------------------- | ------------------------- | --------------------------- |
-| 27  | `permission_groups` | Permission categorization | Admin, Staff groupings      |
-| 28  | `permissions`       | Granular permissions      | 15+ specific permissions    |
-| 29  | `role_permissions`  | Role access rights        | Many-to-many linking        |
-| 30  | `employee_roles`    | Employee assignments      | Multiple roles per employee |
+| 28  | `permission_groups` | Permission categorization | Admin, Staff groupings      |
+| 29  | `permissions`       | Granular permissions      | 15+ specific permissions    |
+| 30  | `role_permissions`  | Role access rights        | Many-to-many linking        |
+| 31  | `employee_roles`    | Employee assignments      | Multiple roles per employee |
 
 ## ✨ Features
 
@@ -350,6 +359,24 @@ INSERT INTO order_items (order_id, variation_id, quantity, modifiers) VALUES
 
 -- Calculate sugar-based price adjustment
 SELECT calculate_sugar_price_adjustment(4.50, 'no_sugar'); -- 5% discount
+```
+
+### 🎁 **Flexible Member Benefits System**
+
+```sql
+-- Define member benefits for different membership tiers
+INSERT INTO member_benefits (member_type, benefit_type, value) VALUES
+('member', 'discount', 5.00),           -- 5% discount for regular members
+('member', 'point_multiplier', 1.0),    -- 1x points for regular members
+('vip', 'discount', 10.00),             -- 10% discount for VIP members
+('vip', 'point_multiplier', 2.0);       -- 2x points for VIP members
+
+-- Product-specific free items for members
+INSERT INTO member_benefits (member_type, benefit_type, product_id) VALUES
+('vip', 'free_item', 5);                -- Free pastry for VIP members
+
+-- Query member benefits for a specific type
+SELECT * FROM member_benefits WHERE member_type = 'vip';
 ```
 
 ### 📊 **Advanced Reporting**
