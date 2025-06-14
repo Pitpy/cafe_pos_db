@@ -51,6 +51,25 @@ EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
 
+-- Multi-Branch ENUM Types
+DO $$ BEGIN
+    CREATE TYPE branch_status AS ENUM ('active', 'inactive', 'maintenance', 'closed');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE access_level AS ENUM ('standard', 'manager', 'limited', 'supervisor');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE inventory_strategy AS ENUM ('centralized', 'independent', 'hybrid');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
 -- Removed fixed currency_code ENUM - now using CHAR(3) for flexibility
 
 -- Core Tables (Revised) - Using IF NOT EXISTS to prevent conflicts
@@ -71,28 +90,108 @@ CREATE TABLE IF NOT EXISTS roles (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 3. Table: employees
+-- 3. Table: branches (Multi-Branch Infrastructure)
+CREATE TABLE IF NOT EXISTS branches (
+    branch_id SERIAL PRIMARY KEY,
+    branch_code VARCHAR(10) NOT NULL UNIQUE,    -- e.g., 'MAIN', 'DT01', 'MLL02'
+    name VARCHAR(100) NOT NULL,                 -- e.g., 'Downtown Branch'
+    address TEXT,
+    phone VARCHAR(20),
+    email VARCHAR(100),
+    manager_employee_id INT,                    -- Branch manager reference
+    timezone VARCHAR(50) DEFAULT 'UTC',
+    currency_code CHAR(3) DEFAULT 'USD' CHECK (currency_code ~ '^[A-Z]{3}$'),
+    tax_rate DECIMAL(5,2) DEFAULT 8.50,        -- Branch-specific tax rate
+    status branch_status DEFAULT 'active',
+    inventory_strategy inventory_strategy DEFAULT 'independent',
+    opening_hours JSONB,                        -- {"mon": "08:00-18:00", "tue": "08:00-18:00"}
+    coordinates POINT,                          -- GPS coordinates for mapping
+    wifi_ssid VARCHAR(50),                      -- Branch WiFi network
+    pos_terminal_count INT DEFAULT 1,           -- Number of POS terminals
+    seating_capacity INT,                       -- Customer seating capacity
+    drive_through BOOLEAN DEFAULT FALSE,        -- Has drive-through service
+    delivery_service BOOLEAN DEFAULT FALSE,    -- Offers delivery
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 4. Table: branch_configs (Branch-specific settings)
+CREATE TABLE IF NOT EXISTS branch_configs (
+    config_id SERIAL PRIMARY KEY,
+    branch_id INT NOT NULL,
+    config_key VARCHAR(50) NOT NULL,            -- e.g., 'loyalty_multiplier', 'pricing_multiplier'
+    config_value JSONB NOT NULL,                -- Flexible configuration storage
+    description TEXT,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (branch_id) REFERENCES branches(branch_id) ON DELETE CASCADE,
+    UNIQUE (branch_id, config_key)
+);
+
+-- 5. Table: branch_schedules (Operating hours management)
+CREATE TABLE IF NOT EXISTS branch_schedules (
+    schedule_id SERIAL PRIMARY KEY,
+    branch_id INT NOT NULL,
+    day_of_week INT NOT NULL CHECK (day_of_week BETWEEN 0 AND 6), -- 0=Sunday, 6=Saturday
+    opening_time TIME,
+    closing_time TIME,
+    is_closed BOOLEAN DEFAULT FALSE,            -- Branch closed on this day
+    break_start_time TIME,                      -- Lunch break start
+    break_end_time TIME,                        -- Lunch break end
+    special_hours_date DATE,                    -- For holiday hours
+    notes TEXT,                                 -- Special instructions
+    is_active BOOLEAN DEFAULT TRUE,
+    FOREIGN KEY (branch_id) REFERENCES branches(branch_id) ON DELETE CASCADE
+);
+
+-- 6. Table: employees
 CREATE TABLE IF NOT EXISTS employees (
     employee_id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     pin CHAR(6) NOT NULL UNIQUE,         -- 6-digit PIN for login
     role_id INT,                         -- References roles table
+    branch_id INT,                       -- Primary branch assignment
     is_active BOOLEAN DEFAULT TRUE,
-    FOREIGN KEY (role_id) REFERENCES roles(role_id)
+    FOREIGN KEY (role_id) REFERENCES roles(role_id),
+    FOREIGN KEY (branch_id) REFERENCES branches(branch_id)
 );
 
--- 4. Table: customers
+-- 7. Table: employee_branches (Employee-Branch assignments)
+CREATE TABLE IF NOT EXISTS employee_branches (
+    assignment_id SERIAL PRIMARY KEY,
+    employee_id INT NOT NULL,
+    branch_id INT NOT NULL,
+    is_primary_branch BOOLEAN DEFAULT FALSE,    -- Employee's home branch
+    access_level access_level DEFAULT 'standard',
+    hourly_rate DECIMAL(8,2),                   -- Branch-specific pay rate
+    assigned_date DATE DEFAULT CURRENT_DATE,
+    end_date DATE,                              -- For temporary assignments
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (employee_id) REFERENCES employees(employee_id) ON DELETE CASCADE,
+    FOREIGN KEY (branch_id) REFERENCES branches(branch_id) ON DELETE CASCADE,
+    UNIQUE (employee_id, branch_id)
+);
+
+-- 8. Table: customers
 CREATE TABLE IF NOT EXISTS customers (
     customer_id SERIAL PRIMARY KEY,
     phone VARCHAR(20) UNIQUE,            
     name VARCHAR(100),
     email VARCHAR(100),
+    member_type VARCHAR(20) DEFAULT 'guest', -- e.g., "guest", "member"
+    member_since DATE,
     loyalty_points INT DEFAULT 0,
     visit_count INT DEFAULT 0,
-    last_visit DATE
+    last_visit DATE,
+    primary_branch_id INT,               -- Customer's preferred branch
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (primary_branch_id) REFERENCES branches(branch_id)
 );
 
--- 5. Table: payment_methods
+-- 9. Table: payment_methods
 CREATE TABLE IF NOT EXISTS payment_methods (
     method_id SERIAL PRIMARY KEY,
     name VARCHAR(50) NOT NULL UNIQUE,   -- e.g., "Cash", "Credit Card"
@@ -101,38 +200,89 @@ CREATE TABLE IF NOT EXISTS payment_methods (
     is_active BOOLEAN DEFAULT TRUE
 );
 
--- 6. Table: products
+-- 10. Table: products
 CREATE TABLE IF NOT EXISTS products (
     product_id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,         -- e.g., "Latte", "Croissant"
     description TEXT,
     category_id INT NOT NULL,
+    has_variants BOOLEAN DEFAULT FALSE,  -- Flag for UI/backend handling
+    base_price DECIMAL(10,2) NOT NULL,  -- Price in base currency
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (category_id) REFERENCES categories(category_id)
 );
 
--- 7. Table: product_variations
+
+-- =================================================================
+-- FLEXIBLE VARIANT SYSTEM TABLES (PostgreSQL)
+-- =================================================================
+
+-- 11. Table: variant_templates
+-- Variant Types (Size/Type Templates)
+CREATE TABLE IF NOT EXISTS variant_templates (
+    template_id SERIAL PRIMARY KEY,
+    name VARCHAR(50) NOT NULL UNIQUE,  -- "Coffee Size", "Temperature", etc.
+    description TEXT,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 12. Table: variant_options
+-- Variant Options (Predefined Values)
+CREATE TABLE IF NOT EXISTS variant_options (
+    option_id SERIAL PRIMARY KEY,
+    template_id INT NOT NULL,
+    value VARCHAR(50) NOT NULL,       -- "small", "hot", etc.
+    display_name VARCHAR(100),        -- "Small (8oz)", "Hot", etc.
+    display_order INT DEFAULT 0,
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (template_id, value),
+    FOREIGN KEY (template_id) REFERENCES variant_templates(template_id) ON DELETE CASCADE
+);
+
+-- 13. Table: product_variations
 CREATE TABLE IF NOT EXISTS product_variations (
     variation_id SERIAL PRIMARY KEY,
     product_id INT NOT NULL,
-    size product_size NOT NULL,
-    type product_type DEFAULT 'none',
-    base_price DECIMAL(10,2) NOT NULL,  -- Price in base currency (USD)
+    price DECIMAL(10,2) NOT NULL,  -- Price in base currency
     cost DECIMAL(10,2),                 -- Production cost in base currency
     sku VARCHAR(20) UNIQUE,             -- e.g., "LAT-M-ICE"
     is_available BOOLEAN DEFAULT TRUE,
     FOREIGN KEY (product_id) REFERENCES products(product_id)
 );
 
--- Transaction Tables (Enhanced)
--- 8. Table: orders
+-- 14. Table: variation_templates
+-- Variation Templates (Size/Type Combinations)
+-- Variation-Option Links (Many-to-Many)
+CREATE TABLE IF NOT EXISTS variation_options (
+    variation_id INT NOT NULL,
+    option_id INT NOT NULL,
+    PRIMARY KEY (variation_id, option_id),
+    FOREIGN KEY (variation_id) REFERENCES product_variations(variation_id) ON DELETE CASCADE,
+    FOREIGN KEY (option_id) REFERENCES variant_options(option_id) ON DELETE CASCADE
+);
+
+-- 15. Table: orders
 CREATE TABLE IF NOT EXISTS orders (
     order_id SERIAL PRIMARY KEY,
     order_number VARCHAR(20) NOT NULL UNIQUE, -- "CAFE-2025-1001"
-    employee_id INT NOT NULL,            
-    customer_id INT,                     -- Loyalty program link
+    employee_id INT NOT NULL,   
+    branch_id INT NOT NULL,    -- Branch where order was placed         
     order_time TIMESTAMP NOT NULL,
+
+    -- Customer Identification (flexible)
+    customer_id INT,                     -- Loyalty program link
+    customer_type ENUM('guest', 'member') DEFAULT 'guest', -- e.g., "guest", "member"
+    guest_info JSONB,                    -- Additional info for guests (e.g., name, phone)
+
+    -- Loyalty Integration
+    loyalty_card_number VARCHAR(50),     -- e.g., "LC123456"
+    loyalty_points_earned INT DEFAULT 0,
+    loyalty_points_redeemed INT DEFAULT 0,
+
+    -- Financial Columns
     currency_code CHAR(3) NOT NULL DEFAULT 'USD' CHECK (currency_code ~ '^[A-Z]{3}$'),
     exchange_rate DECIMAL(15,6) DEFAULT 1.0, -- Rate used for this order
     subtotal DECIMAL(12,2) NOT NULL,     -- In order currency
@@ -141,13 +291,25 @@ CREATE TABLE IF NOT EXISTS orders (
     tip_amount DECIMAL(10,2) DEFAULT 0.00, -- In order currency
     total_amount DECIMAL(12,2) NOT NULL, -- Final amount in order currency
     base_total_amount DECIMAL(12,2) NOT NULL, -- Total in base currency (USD)
+
+     -- Status Tracking
     status order_status DEFAULT 'open',
+
+    -- Order Notes
     notes TEXT,
+
+    -- Ensure either customer_id or guest_info exists
+    CONSTRAINT chk_customer_identification CHECK (
+        customer_id IS NOT NULL OR guest_info IS NOT NULL
+    ),
+
+    -- Foreign Keys
     FOREIGN KEY (employee_id) REFERENCES employees(employee_id),
-    FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
+    FOREIGN KEY (customer_id) REFERENCES customers(customer_id),
+    FOREIGN KEY (branch_id) REFERENCES branches(branch_id)
 );
 
--- 9. Table: order_payments
+-- 16. Table: order_payments
 CREATE TABLE IF NOT EXISTS order_payments (
     payment_id SERIAL PRIMARY KEY,
     order_id INT NOT NULL,
@@ -165,7 +327,7 @@ CREATE TABLE IF NOT EXISTS order_payments (
     FOREIGN KEY (method_id) REFERENCES payment_methods(method_id)
 );
 
--- 10. Table: order_items
+-- 17. Table: order_items
 CREATE TABLE IF NOT EXISTS order_items (
     order_item_id SERIAL PRIMARY KEY,
     order_id INT NOT NULL,
@@ -185,7 +347,7 @@ CREATE TABLE IF NOT EXISTS order_items (
 );
 
 -- Inventory & Recipe Tables
--- 11. Table: ingredients
+-- 18. Table: ingredients
 CREATE TABLE IF NOT EXISTS ingredients (
     ingredient_id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL UNIQUE,  -- e.g., "Coffee Beans", "Oat Milk"
@@ -195,7 +357,7 @@ CREATE TABLE IF NOT EXISTS ingredients (
     supplier VARCHAR(100)
 );
 
--- 12. Table: recipes
+-- 19. Table: recipes
 CREATE TABLE IF NOT EXISTS recipes (
     recipe_id SERIAL PRIMARY KEY,
     variation_id INT NOT NULL,
@@ -206,7 +368,7 @@ CREATE TABLE IF NOT EXISTS recipes (
     UNIQUE (variation_id, ingredient_id)
 );
 
--- 13. Table: inventory_transactions
+-- 20. Table: inventory_transactions
 CREATE TABLE IF NOT EXISTS inventory_transactions (
     transaction_id SERIAL PRIMARY KEY,
     ingredient_id INT NOT NULL,
@@ -214,13 +376,82 @@ CREATE TABLE IF NOT EXISTS inventory_transactions (
     transaction_type transaction_type,
     related_order_id INT,                -- For sales deductions
     employee_id INT,                     -- Who performed
+    branch_id INT NOT NULL DEFAULT 1,    -- Branch where transaction occurred
     transaction_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     notes TEXT,
-    FOREIGN KEY (ingredient_id) REFERENCES ingredients(ingredient_id)
+    FOREIGN KEY (ingredient_id) REFERENCES ingredients(ingredient_id),
+    FOREIGN KEY (branch_id) REFERENCES branches(branch_id)
+);
+
+-- Multi-Branch Inventory Management Tables
+-- 21. Table: central_inventory (for centralized inventory strategy)
+CREATE TABLE IF NOT EXISTS central_inventory (
+    central_inventory_id SERIAL PRIMARY KEY,
+    ingredient_id INT NOT NULL,
+    total_stock DECIMAL(10,2) DEFAULT 0.0,
+    allocated_stock DECIMAL(10,2) DEFAULT 0.0,  -- Reserved for branches
+    available_stock DECIMAL(10,2) GENERATED ALWAYS AS (total_stock - allocated_stock) STORED,
+    reorder_level DECIMAL(10,2),
+    max_stock_level DECIMAL(10,2),              -- Maximum storage capacity
+    cost_per_unit DECIMAL(8,2),                 -- Purchase cost
+    supplier_id INT,                            -- Reference to suppliers
+    last_delivery_date DATE,
+    next_expected_delivery DATE,
+    notes TEXT,
+    FOREIGN KEY (ingredient_id) REFERENCES ingredients(ingredient_id),
+    UNIQUE (ingredient_id)
+);
+
+-- 22. Table: branch_inventory (branch-specific stock levels)
+CREATE TABLE IF NOT EXISTS branch_inventory (
+    branch_inventory_id SERIAL PRIMARY KEY,
+    branch_id INT NOT NULL,
+    ingredient_id INT NOT NULL,
+    current_stock DECIMAL(10,2) DEFAULT 0.0,
+    allocated_from_central DECIMAL(10,2) DEFAULT 0.0, -- If using central inventory
+    reorder_threshold DECIMAL(10,2),
+    max_capacity DECIMAL(10,2),                 -- Storage capacity for this ingredient
+    cost_per_unit DECIMAL(8,2),                 -- Branch-specific cost
+    last_restock_date DATE,
+    last_count_date DATE,                       -- Last physical inventory count
+    auto_reorder BOOLEAN DEFAULT TRUE,          -- Automatic reordering enabled
+    last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (branch_id) REFERENCES branches(branch_id) ON DELETE CASCADE,
+    FOREIGN KEY (ingredient_id) REFERENCES ingredients(ingredient_id),
+    UNIQUE (branch_id, ingredient_id)
+);
+
+-- 23. Table: inventory_transfers (inter-branch transfers)
+CREATE TABLE IF NOT EXISTS inventory_transfers (
+    transfer_id SERIAL PRIMARY KEY,
+    transfer_number VARCHAR(20) NOT NULL UNIQUE, -- e.g., 'TRNF-2025-001'
+    from_branch_id INT,                         -- NULL for central warehouse
+    to_branch_id INT NOT NULL,
+    ingredient_id INT NOT NULL,
+    quantity_requested DECIMAL(10,2) NOT NULL,
+    quantity_sent DECIMAL(10,2),
+    quantity_received DECIMAL(10,2),
+    unit_cost DECIMAL(8,2),
+    transfer_status VARCHAR(20) DEFAULT 'pending', -- pending, shipped, received, cancelled
+    requested_by INT,                           -- Employee who requested
+    approved_by INT,                            -- Manager who approved
+    shipped_by INT,                             -- Employee who shipped
+    received_by INT,                            -- Employee who received
+    request_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    ship_date TIMESTAMP,
+    receive_date TIMESTAMP,
+    notes TEXT,
+    FOREIGN KEY (from_branch_id) REFERENCES branches(branch_id),
+    FOREIGN KEY (to_branch_id) REFERENCES branches(branch_id),
+    FOREIGN KEY (ingredient_id) REFERENCES ingredients(ingredient_id),
+    FOREIGN KEY (requested_by) REFERENCES employees(employee_id),
+    FOREIGN KEY (approved_by) REFERENCES employees(employee_id),
+    FOREIGN KEY (shipped_by) REFERENCES employees(employee_id),
+    FOREIGN KEY (received_by) REFERENCES employees(employee_id)
 );
 
 -- Multi-Currency Support Tables
--- 14. Table: currencies
+-- 24. Table: currencies
 CREATE TABLE IF NOT EXISTS currencies (
     currency_id SERIAL PRIMARY KEY,
     code CHAR(3) NOT NULL UNIQUE CHECK (code ~ '^[A-Z]{3}$'),
@@ -231,7 +462,7 @@ CREATE TABLE IF NOT EXISTS currencies (
     is_active BOOLEAN DEFAULT TRUE
 );
 
--- 15. Table: exchange_rates
+-- 25. Table: exchange_rates
 CREATE TABLE IF NOT EXISTS exchange_rates (
     rate_id SERIAL PRIMARY KEY,
     from_currency CHAR(3) NOT NULL CHECK (from_currency ~ '^[A-Z]{3}$'),
@@ -243,7 +474,7 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
     UNIQUE (from_currency, to_currency, effective_date)
 );
 
--- 16. Table: exchange_rate_history
+-- 26. Table: exchange_rate_history
 CREATE TABLE IF NOT EXISTS exchange_rate_history (
     history_id SERIAL PRIMARY KEY,
     rate_id INT NOT NULL,
@@ -255,14 +486,14 @@ CREATE TABLE IF NOT EXISTS exchange_rate_history (
     FOREIGN KEY (rate_id) REFERENCES exchange_rates(rate_id)
 );
 
--- 17. Table: permission_groups
+-- 27. Table: permission_groups
 CREATE TABLE IF NOT EXISTS permission_groups (
     group_id SERIAL PRIMARY KEY,
     name VARCHAR(50) NOT NULL UNIQUE,   -- e.g., "Admin", "Staff"
     description TEXT
 );
 
--- 18. Table: permissions
+-- 28. Table: permissions
 CREATE TABLE IF NOT EXISTS permissions (
     permission_id SERIAL PRIMARY KEY,
     code VARCHAR(50) NOT NULL UNIQUE,  -- e.g., "CREATE_ORDER", "PROCESS_REFUND"
@@ -274,7 +505,7 @@ CREATE TABLE IF NOT EXISTS permissions (
     FOREIGN KEY (group_id) REFERENCES permission_groups(group_id)
 );
 
--- 19. Table: role_permissions
+-- 29. Table: role_permissions
 CREATE TABLE IF NOT EXISTS role_permissions (
     role_permission_id SERIAL PRIMARY KEY,
     role_id INT NOT NULL,
@@ -287,7 +518,7 @@ CREATE TABLE IF NOT EXISTS role_permissions (
     UNIQUE (role_id, permission_id)
 );
 
--- 20. Table: employee_roles (Many-to-Many: Employee to Role)
+-- 30. Table: employee_roles (Many-to-Many: Employee to Role)
 CREATE TABLE IF NOT EXISTS employee_roles (
     employee_role_id SERIAL PRIMARY KEY,
     employee_id INT NOT NULL,
@@ -664,130 +895,109 @@ DO $$ BEGIN CREATE INDEX idx_inventory_usage ON inventory_transactions(ingredien
 DO $$ BEGIN CREATE INDEX idx_customer_loyalty ON orders(customer_id, status, order_time, total_amount) WHERE customer_id IS NOT NULL; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
 -- =================================================================
--- PERFORMANCE VIEWS FOR COMMON OPERATIONS (with conflict prevention)
+-- MISSING CRITICAL INDEXES FOR POS PERFORMANCE
 -- =================================================================
 
--- Daily Sales Summary (Optimized)
-DROP MATERIALIZED VIEW IF EXISTS daily_sales_summary CASCADE;
-CREATE MATERIALIZED VIEW daily_sales_summary AS
-SELECT 
-    DATE(o.order_time) as sale_date,
-    o.currency_code,
-    COUNT(*) as order_count,
-    SUM(o.total_amount) as total_revenue,
-    SUM(o.base_total_amount) as total_revenue_usd,
-    AVG(o.total_amount) as avg_order_value,
-    SUM(o.tax_amount) as total_tax
-FROM orders o
-WHERE o.status = 'paid' 
-    AND o.order_time >= CURRENT_DATE - INTERVAL '30 days'
-GROUP BY DATE(o.order_time), o.currency_code;
+-- Branch-related indexes (MISSING - Critical for multi-branch)
+DO $$ BEGIN CREATE INDEX idx_orders_branch_time ON orders(branch_id, order_time DESC); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_branch_status ON orders(branch_id, status, order_time DESC); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_inventory_transactions_branch_time ON inventory_transactions(branch_id, transaction_time DESC); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_employees_branch_active ON employees(branch_id, is_active); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_employee_branches_active ON employee_branches(branch_id, is_active); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
-DO $$ BEGIN CREATE UNIQUE INDEX idx_daily_sales_summary ON daily_sales_summary(sale_date, currency_code); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+-- Variant system indexes (MISSING - Critical for product variations)
+DO $$ BEGIN CREATE INDEX idx_variation_options_variation ON variation_options(variation_id); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_variation_options_option ON variation_options(option_id); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_variant_options_template ON variant_options(template_id, display_order); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_variant_templates_active ON variant_templates(is_active, name); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
--- Popular Products View (Optimized)
-DROP MATERIALIZED VIEW IF EXISTS popular_products_summary CASCADE;
-CREATE MATERIALIZED VIEW popular_products_summary AS
-SELECT 
-    pv.variation_id,
-    p.name as product_name,
-    pv.size,
-    pv.type,
-    pv.sku,
-    COUNT(oi.order_item_id) as order_count,
-    SUM(oi.quantity) as total_quantity_sold,
-    SUM(oi.quantity * oi.base_unit_price) as total_revenue_usd,
-    AVG(oi.display_unit_price) as avg_selling_price
-FROM order_items oi
-JOIN product_variations pv ON oi.variation_id = pv.variation_id
-JOIN products p ON pv.product_id = p.product_id
-JOIN orders o ON oi.order_id = o.order_id
-WHERE o.status = 'paid'
-    AND o.order_time >= CURRENT_DATE - INTERVAL '30 days'
-GROUP BY pv.variation_id, p.name, pv.size, pv.type, pv.sku;
+-- Product pricing indexes (CRITICAL for menu display)
+DO $$ BEGIN CREATE INDEX idx_product_variations_price_range ON product_variations(price, is_available) WHERE is_available = true; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_products_category_price ON products(category_id, base_price, is_active) WHERE is_active = true; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
-DO $$ BEGIN CREATE UNIQUE INDEX idx_popular_products_summary ON popular_products_summary(variation_id); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+-- Real-time inventory tracking (CRITICAL for stock management)
+DO $$ BEGIN CREATE INDEX idx_recipes_bulk_lookup ON recipes(ingredient_id, quantity); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_ingredients_supplier_stock ON ingredients(supplier, current_stock, reorder_level); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
--- Low Stock Alert View
-CREATE OR REPLACE VIEW low_stock_alert AS
-SELECT 
-    i.ingredient_id,
-    i.name,
-    i.current_stock,
-    i.reorder_level,
-    i.unit,
-    (i.current_stock - i.reorder_level) as stock_difference,
-    CASE 
-        WHEN i.current_stock <= 0 THEN 'OUT_OF_STOCK'
-        WHEN i.current_stock <= i.reorder_level * 0.5 THEN 'CRITICAL'
-        WHEN i.current_stock <= i.reorder_level THEN 'LOW'
-        ELSE 'OK'
-    END as stock_status
-FROM ingredients i
-WHERE i.reorder_level IS NOT NULL
-ORDER BY stock_difference ASC;
+-- Order processing optimization (CRITICAL for POS speed)
+DO $$ BEGIN CREATE INDEX idx_order_items_modifiers ON order_items USING gin(modifiers); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_employee_branch ON orders(employee_id, branch_id, order_time DESC); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Permission system performance (Important for security checks)
+DO $$ BEGIN CREATE INDEX idx_employee_roles_active ON employee_roles(employee_id, is_active); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_role_permissions_lookup ON role_permissions(role_id, permission_id); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_permissions_code_lookup ON permissions(code, is_active) WHERE is_active = true; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Financial reporting optimization
+DO $$ BEGIN CREATE INDEX idx_orders_branch_currency_date ON orders(branch_id, currency_code, DATE(order_time), status) WHERE status = 'paid'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_order_payments_branch_time ON order_payments(order_id, payment_time DESC, status) WHERE status = 'completed'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Guest customer lookup indexes (CRITICAL for non-member customer management)
+DO $$ BEGIN CREATE INDEX idx_orders_guest_phone ON orders USING gin((guest_info->>'phone')) WHERE customer_id IS NULL AND guest_info ? 'phone'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_guest_email ON orders USING gin((guest_info->>'email')) WHERE customer_id IS NULL AND guest_info ? 'email'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_guest_name ON orders USING gin(to_tsvector('english', guest_info->>'name')) WHERE customer_id IS NULL AND guest_info ? 'name'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_guest_lookup ON orders((guest_info->>'phone'), (guest_info->>'email'), customer_type) WHERE customer_type = 'guest'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_customer_type ON orders(customer_type, order_time DESC); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_loyalty_card ON orders(loyalty_card_number) WHERE loyalty_card_number IS NOT NULL; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Guest analytics and conversion tracking indexes
+DO $$ BEGIN CREATE INDEX idx_orders_guest_frequency ON orders((guest_info->>'phone'), order_time DESC) WHERE customer_id IS NULL AND guest_info ? 'phone'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_guest_value ON orders((guest_info->>'phone'), total_amount DESC, order_time DESC) WHERE customer_id IS NULL AND guest_info ? 'phone'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_member_vs_guest ON orders(customer_type, status, DATE(order_time), total_amount) WHERE status = 'paid'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
 -- =================================================================
--- MAINTENANCE PROCEDURES
+-- REDUNDANCY ANALYSIS & OPTIMIZATION NOTES
 -- =================================================================
 
--- Refresh materialized views (run daily)
-CREATE OR REPLACE FUNCTION refresh_performance_views() 
-RETURNS void AS $$
-BEGIN
-    REFRESH MATERIALIZED VIEW CONCURRENTLY daily_sales_summary;
-    REFRESH MATERIALIZED VIEW CONCURRENTLY popular_products_summary;
-END;
-$$ LANGUAGE plpgsql;
+-- REDUNDANT INDEXES IDENTIFIED:
+-- 1. idx_orders_time_status vs idx_orders_recent - Consider dropping idx_orders_time_status
+-- 2. idx_orders_status_time has similar coverage to idx_orders_time_status
+-- 3. Multiple payment time indexes could be consolidated
 
--- Clean old data procedure
-CREATE OR REPLACE FUNCTION cleanup_old_data(days_to_keep INT DEFAULT 365)
-RETURNS void AS $$
-BEGIN
-    -- Archive old exchange rates (keep only last rate per currency pair)
-    DELETE FROM exchange_rates 
-    WHERE effective_date < CURRENT_DATE - INTERVAL '30 days'
-    AND rate_id NOT IN (
-        SELECT DISTINCT ON (from_currency, to_currency) rate_id
-        FROM exchange_rates
-        ORDER BY from_currency, to_currency, effective_date DESC
-    );
-    
-    -- Clean old inventory transactions (keep 1 year)
-    DELETE FROM inventory_transactions 
-    WHERE transaction_time < CURRENT_DATE - (days_to_keep || ' days')::INTERVAL;
-    
-    RAISE NOTICE 'Cleanup completed for data older than % days', days_to_keep;
-END;
-$$ LANGUAGE plpgsql;
+-- MISSING COMPOSITE INDEXES FOR COMMON POS QUERIES:
+-- These indexes support the most frequent POS operations
+
+-- Menu loading with branch context
+DO $$ BEGIN CREATE INDEX idx_menu_display ON product_variations(product_id, branch_id, is_available, price) WHERE is_available = true; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Order completion workflow
+DO $$ BEGIN CREATE INDEX idx_order_completion ON orders(status, order_time DESC, branch_id, total_amount) WHERE status IN ('open', 'paid'); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Inventory depletion tracking
+DO $$ BEGIN CREATE INDEX idx_inventory_depletion ON inventory_transactions(ingredient_id, branch_id, transaction_type, transaction_time DESC) WHERE transaction_type = 'sale'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
 -- =================================================================
--- PERFORMANCE MONITORING QUERIES
+-- INDEX USAGE MONITORING QUERIES (Commented for reference)
 -- =================================================================
 
--- Check index usage
 /*
+-- Monitor index usage efficiency
 SELECT 
-    schemaname,
-    tablename,
-    indexname,
-    idx_tup_read,
-    idx_tup_fetch,
-    idx_scan
+    schemaname, tablename, indexname, 
+    idx_scan, idx_tup_read, idx_tup_fetch,
+    idx_tup_read::float / NULLIF(idx_scan, 0) as avg_tuples_per_scan
 FROM pg_stat_user_indexes 
+WHERE schemaname = 'public'
 ORDER BY idx_scan DESC;
-*/
 
--- Check slow queries
-/*
+-- Find unused indexes
+SELECT schemaname, tablename, indexname
+FROM pg_stat_user_indexes 
+WHERE idx_scan = 0 AND indexname NOT LIKE '%_pkey%'
+ORDER BY schemaname, tablename;
+
+-- Check for duplicate/overlapping indexes
 SELECT 
-    query,
-    mean_exec_time,
-    calls,
-    total_exec_time
-FROM pg_stat_statements 
-ORDER BY mean_exec_time DESC 
-LIMIT 10;
+    t.schemaname, t.tablename, 
+    i1.indexname as index1, i2.indexname as index2,
+    i1.indexdef, i2.indexdef
+FROM pg_indexes i1
+JOIN pg_indexes i2 ON i1.tablename = i2.tablename 
+    AND i1.indexname < i2.indexname
+JOIN pg_tables t ON i1.tablename = t.tablename
+WHERE t.schemaname = 'public'
+    AND i1.indexdef SIMILAR TO i2.indexdef
+ORDER BY t.tablename;
 */
 
 -- Sugar Level Management System
@@ -1058,394 +1268,461 @@ INSERT INTO order_items (order_id, variation_id, quantity, base_unit_price, disp
 (4, 12, 1, 4.50, 4.50, '{"sugar_level": "less_sugar"}') -- Iced Coffee
 ON CONFLICT DO NOTHING;
 
--- Sugar Level Usage Examples and Test Queries
-
--- Example 1: View sugar level preferences summary
--- SELECT * FROM sugar_level_preferences;
-
--- Example 2: View orders with sugar level details
--- SELECT * FROM order_items_with_sugar ORDER BY order_time DESC LIMIT 10;
-
--- Example 3: Check daily sugar trends
--- SELECT * FROM daily_sugar_trends WHERE order_date >= CURRENT_DATE - INTERVAL '7 days';
-
--- Example 4: Calculate price adjustments for different sugar levels
--- SELECT 
---     'no_sugar' as level,
---     calculate_sugar_price_adjustment(5.50, 'no_sugar') as adjusted_price,
---     (calculate_sugar_price_adjustment(5.50, 'no_sugar') - 5.50) as price_difference
--- UNION ALL
--- SELECT 
---     'extra_sweet' as level,
---     calculate_sugar_price_adjustment(5.50, 'extra_sweet') as adjusted_price,
---     (calculate_sugar_price_adjustment(5.50, 'extra_sweet') - 5.50) as price_difference;
-
--- Example 5: Format order items with sugar level descriptions
--- SELECT 
---     order_item_id,
---     format_order_item_with_sugar(
---         'Latte', 
---         'medium hot', 
---         '{"sugar_level": "extra_sweet", "whipped_cream": true}'::jsonb
---     ) as formatted_description;
-
--- Example 6: Test constraint validation
--- This should work:
--- INSERT INTO order_items (order_id, variation_id, quantity, base_unit_price, display_unit_price, modifiers) 
--- VALUES (1, 1, 1, 4.50, 4.50, '{"sugar_level": "regular"}');
-
--- This should fail due to constraint:
--- INSERT INTO order_items (order_id, variation_id, quantity, base_unit_price, display_unit_price, modifiers) 
--- VALUES (1, 1, 1, 4.50, 4.50, '{"sugar_level": "invalid_level"}');
-
 -- =================================================================
--- PERMISSION SYSTEM HELPER FUNCTIONS
+-- VARIANT SYSTEM HELPER FUNCTIONS
 -- =================================================================
 
--- Function to check if an employee has a specific permission
-CREATE OR REPLACE FUNCTION employee_has_permission(
-    emp_id INT,
-    permission_code VARCHAR(50)
-) RETURNS BOOLEAN AS $$
-DECLARE
-    has_perm BOOLEAN := FALSE;
-BEGIN
-    SELECT EXISTS(
-        SELECT 1 
-        FROM employee_roles er
-        JOIN role_permissions rp ON er.role_id = rp.role_id
-        JOIN permissions p ON rp.permission_id = p.permission_id
-        WHERE er.employee_id = emp_id 
-          AND p.code = permission_code
-          AND er.is_active = TRUE
-          AND p.is_active = TRUE
-    ) INTO has_perm;
-    
-    RETURN has_perm;
-END;
-$$ LANGUAGE plpgsql;
-
--- Function to get all permissions for an employee
-CREATE OR REPLACE FUNCTION get_employee_permissions(emp_id INT)
-RETURNS TABLE(
-    permission_code VARCHAR(50),
-    permission_name VARCHAR(100),
-    permission_description TEXT,
-    role_name VARCHAR(50)
-) AS $$
-BEGIN
-    RETURN QUERY
-    SELECT DISTINCT
-        p.code,
-        p.name,
-        p.description,
-        r.name as role_name
-    FROM employee_roles er
-    JOIN roles r ON er.role_id = r.role_id
-    JOIN role_permissions rp ON r.role_id = rp.role_id
-    JOIN permissions p ON rp.permission_id = p.permission_id
-    WHERE er.employee_id = emp_id 
-      AND er.is_active = TRUE
-      AND r.is_active = TRUE
-      AND p.is_active = TRUE
-    ORDER BY r.name, p.code;
-END;
-$$ LANGUAGE plpgsql;
-
--- Function to get all roles for an employee
-CREATE OR REPLACE FUNCTION get_employee_roles(emp_id INT)
-RETURNS TABLE(
-    role_id INT,
-    role_name VARCHAR(50),
-    role_description TEXT,
-    assigned_at TIMESTAMP
+-- Function to get variation options for a product variation
+CREATE OR REPLACE FUNCTION get_variation_options(p_variation_id INT)
+RETURNS TABLE (
+    template_name VARCHAR(50),
+    option_value VARCHAR(50),
+    option_display_name VARCHAR(100)
 ) AS $$
 BEGIN
     RETURN QUERY
     SELECT 
-        r.role_id,
-        r.name,
-        r.description,
-        er.assigned_at
-    FROM employee_roles er
-    JOIN roles r ON er.role_id = r.role_id
-    WHERE er.employee_id = emp_id 
-      AND er.is_active = TRUE
-      AND r.is_active = TRUE
-    ORDER BY er.assigned_at;
+        vt.name as template_name,
+        vo.value as option_value,
+        COALESCE(vo.display_name, vo.value) as option_display_name
+    FROM variation_options vop
+    JOIN variant_options vo ON vop.option_id = vo.option_id
+    JOIN variant_templates vt ON vo.template_id = vt.template_id
+    WHERE vop.variation_id = p_variation_id
+    ORDER BY vt.name, vo.display_order;
 END;
 $$ LANGUAGE plpgsql;
 
--- Function to assign role to employee
-CREATE OR REPLACE FUNCTION assign_role_to_employee(
-    emp_id INT,
-    role_name VARCHAR(50),
-    assigned_by_id INT DEFAULT NULL
-) RETURNS BOOLEAN AS $$
+-- Function to create a product variation with options
+CREATE OR REPLACE FUNCTION create_product_variation(
+    p_product_id INT,
+    p_price DECIMAL(10,2),
+    p_cost DECIMAL(10,2) DEFAULT NULL,
+    p_sku VARCHAR(20) DEFAULT NULL,
+    p_option_ids INT[] DEFAULT ARRAY[]::INT[]
+)
+RETURNS INT AS $$
 DECLARE
-    target_role_id INT;
-    existing_assignment BOOLEAN;
+    new_variation_id INT;
+    option_id INT;
 BEGIN
-    -- Get role ID
-    SELECT role_id INTO target_role_id 
-    FROM roles 
-    WHERE name = role_name AND is_active = TRUE;
+    -- Insert the product variation
+    INSERT INTO product_variations (product_id, price, cost, sku, is_available)
+    VALUES (p_product_id, p_price, p_cost, p_sku, TRUE)
+    RETURNING variation_id INTO new_variation_id;
     
-    IF target_role_id IS NULL THEN
-        RAISE EXCEPTION 'Role % not found or inactive', role_name;
+    -- Link the variation to options
+    IF array_length(p_option_ids, 1) > 0 THEN
+        FOREACH option_id IN ARRAY p_option_ids
+        LOOP
+            INSERT INTO variation_options (variation_id, option_id)
+            VALUES (new_variation_id, option_id);
+        END LOOP;
     END IF;
     
-    -- Check if assignment already exists
-    SELECT EXISTS(
-        SELECT 1 FROM employee_roles 
-        WHERE employee_id = emp_id AND role_id = target_role_id
-    ) INTO existing_assignment;
+    RETURN new_variation_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to get product display name with variation options
+CREATE OR REPLACE FUNCTION get_variation_display_name(
+    p_product_name TEXT,
+    p_variation_id INT
+)
+RETURNS TEXT AS $$
+DECLARE
+    variation_options_text TEXT := '';
+    option_text TEXT;
+BEGIN
+    -- Get all options for this variation
+    FOR option_text IN
+        SELECT COALESCE(vo.display_name, vo.value)
+        FROM variation_options vop
+        JOIN variant_options vo ON vop.option_id = vo.option_id
+        JOIN variant_templates vt ON vo.template_id = vt.template_id
+        WHERE vop.variation_id = p_variation_id
+        ORDER BY vt.name, vo.display_order
+    LOOP
+        IF variation_options_text = '' THEN
+            variation_options_text := option_text;
+        ELSE
+            variation_options_text := variation_options_text || ', ' || option_text;
+        END IF;
+    END LOOP;
     
-    IF existing_assignment THEN
-        -- Reactivate if exists but inactive
-        UPDATE employee_roles 
-        SET is_active = TRUE, assigned_at = CURRENT_TIMESTAMP, assigned_by = assigned_by_id
-        WHERE employee_id = emp_id AND role_id = target_role_id;
+    -- Return formatted name
+    IF variation_options_text = '' THEN
+        RETURN p_product_name;
     ELSE
-        -- Create new assignment
-        INSERT INTO employee_roles (employee_id, role_id, assigned_by)
-        VALUES (emp_id, target_role_id, assigned_by_id);
+        RETURN p_product_name || ' (' || variation_options_text || ')';
     END IF;
-    
-    RETURN TRUE;
-END;
-$$ LANGUAGE plpgsql;
-
--- Function to remove role from employee
-CREATE OR REPLACE FUNCTION remove_role_from_employee(
-    emp_id INT,
-    role_name VARCHAR(50)
-) RETURNS BOOLEAN AS $$
-DECLARE
-    target_role_id INT;
-BEGIN
-    -- Get role ID
-    SELECT role_id INTO target_role_id 
-    FROM roles 
-    WHERE name = role_name;
-    
-    IF target_role_id IS NULL THEN
-        RAISE EXCEPTION 'Role % not found', role_name;
-    END IF;
-    
-    -- Deactivate the role assignment
-    UPDATE employee_roles 
-    SET is_active = FALSE 
-    WHERE employee_id = emp_id AND role_id = target_role_id;
-    
-    RETURN TRUE;
-END;
-$$ LANGUAGE plpgsql;
-
--- Function to validate order operation permission
-CREATE OR REPLACE FUNCTION can_employee_perform_order_action(
-    emp_id INT,
-    action_type VARCHAR(20)  -- 'create', 'modify', 'cancel', 'refund'
-) RETURNS BOOLEAN AS $$
-DECLARE
-    required_permission VARCHAR(50);
-BEGIN
-    CASE action_type
-        WHEN 'create' THEN required_permission := 'CREATE_ORDER';
-        WHEN 'modify' THEN required_permission := 'MODIFY_ORDER';
-        WHEN 'cancel' THEN required_permission := 'CANCEL_ORDER';
-        WHEN 'refund' THEN required_permission := 'PROCESS_REFUND';
-        ELSE 
-            RAISE EXCEPTION 'Invalid action type: %', action_type;
-    END CASE;
-    
-    RETURN employee_has_permission(emp_id, required_permission);
 END;
 $$ LANGUAGE plpgsql;
 
 -- =================================================================
--- PERMISSION SYSTEM INDEXES FOR PERFORMANCE
+-- VARIANT SYSTEM SAMPLE DATA
 -- =================================================================
 
--- Indexes for permission tables (with conflict prevention)
-DO $$ BEGIN
-    CREATE INDEX idx_employee_roles_employee_active ON employee_roles(employee_id, is_active);
-EXCEPTION
-    WHEN duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-    CREATE INDEX idx_employee_roles_role_active ON employee_roles(role_id, is_active);
-EXCEPTION
-    WHEN duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-    CREATE INDEX idx_role_permissions_role ON role_permissions(role_id);
-EXCEPTION
-    WHEN duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-    CREATE INDEX idx_role_permissions_permission ON role_permissions(permission_id);
-EXCEPTION
-    WHEN duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-    CREATE INDEX idx_permissions_code_active ON permissions(code, is_active);
-EXCEPTION
-    WHEN duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-    CREATE INDEX idx_permissions_group_active ON permissions(group_id, is_active);
-EXCEPTION
-    WHEN duplicate_table THEN NULL;
-END $$;
-
-DO $$ BEGIN
-    CREATE INDEX idx_roles_name_active ON roles(name, is_active);
-EXCEPTION
-    WHEN duplicate_table THEN NULL;
-END $$;
-
--- =================================================================
--- PERMISSION SYSTEM SAMPLE DATA
--- =================================================================
-
--- Sample Permission Groups
-INSERT INTO permission_groups (name, description) VALUES
-('System Administration', 'Full system access and configuration'),
-('Order Management', 'Create, modify, and process orders'),
-('Inventory Management', 'Stock control and ingredient management'),
-('Financial Operations', 'Payment processing and financial reports'),
-('Staff Management', 'Employee and scheduling operations'),
-('Reporting', 'Access to reports and analytics')
+-- Sample product with variants
+INSERT INTO products (name, description, category_id, has_variants, base_price, is_active) VALUES
+('Latte', 'Rich espresso with steamed milk', 1, true, 4.50, true)
 ON CONFLICT (name) DO NOTHING;
 
--- Sample Permissions
-INSERT INTO permissions (code, name, description, group_id) VALUES
--- System Administration
-('SYSTEM_ADMIN', 'System Administrator', 'Full system access', 
-    (SELECT group_id FROM permission_groups WHERE name = 'System Administration')),
-('MANAGE_USERS', 'Manage Users', 'Create and manage user accounts',
-    (SELECT group_id FROM permission_groups WHERE name = 'System Administration')),
-('SYSTEM_CONFIG', 'System Configuration', 'Modify system settings',
-    (SELECT group_id FROM permission_groups WHERE name = 'System Administration')),
+-- Sample product variations with options
+INSERT INTO product_variations (product_id, price, cost, sku, is_available) VALUES
+-- Latte variations
+(1, 4.50, 1.20, 'LAT-SM-HOT', true),
+(1, 5.50, 1.50, 'LAT-MD-HOT', true),
+(1, 6.50, 1.80, 'LAT-LG-HOT', true),
+(1, 4.75, 1.25, 'LAT-SM-ICE', true),
+(1, 5.75, 1.55, 'LAT-MD-ICE', true),
+(1, 6.75, 1.85, 'LAT-LG-ICE', true)
+ON CONFLICT (sku) DO NOTHING;
 
--- Order Management
-('CREATE_ORDER', 'Create Order', 'Create new customer orders',
-    (SELECT group_id FROM permission_groups WHERE name = 'Order Management')),
-('MODIFY_ORDER', 'Modify Order', 'Edit existing orders',
-    (SELECT group_id FROM permission_groups WHERE name = 'Order Management')),
-('CANCEL_ORDER', 'Cancel Order', 'Cancel customer orders',
-    (SELECT group_id FROM permission_groups WHERE name = 'Order Management')),
-('PROCESS_REFUND', 'Process Refund', 'Process customer refunds',
-    (SELECT group_id FROM permission_groups WHERE name = 'Order Management')),
-('VIEW_ALL_ORDERS', 'View All Orders', 'Access to all order history',
-    (SELECT group_id FROM permission_groups WHERE name = 'Order Management')),
+-- Link variations to size options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+-- Hot variations
+(1, (SELECT option_id FROM variant_options WHERE value = 'small' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'medium' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'large' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+-- Iced variations
+(4, (SELECT option_id FROM variant_options WHERE value = 'small' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'medium' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'large' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;
 
--- Inventory Management
-('MANAGE_INVENTORY', 'Manage Inventory', 'Add/remove inventory items',
-    (SELECT group_id FROM permission_groups WHERE name = 'Inventory Management')),
-('STOCK_ADJUSTMENT', 'Stock Adjustment', 'Adjust stock levels',
-    (SELECT group_id FROM permission_groups WHERE name = 'Inventory Management')),
-('VIEW_INVENTORY', 'View Inventory', 'View current inventory levels',
-    (SELECT group_id FROM permission_groups WHERE name = 'Inventory Management')),
+-- Link variations to temperature options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+(1, (SELECT option_id FROM variant_options WHERE value = 'hot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'hot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'hot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(4, (SELECT option_id FROM variant_options WHERE value = 'iced' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'iced' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'iced' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;
 
--- Financial Operations
-('PROCESS_PAYMENT', 'Process Payment', 'Handle customer payments',
-    (SELECT group_id FROM permission_groups WHERE name = 'Financial Operations')),
-('VIEW_FINANCIAL_REPORTS', 'View Financial Reports', 'Access financial reports',
-    (SELECT group_id FROM permission_groups WHERE name = 'Financial Operations')),
-('CASH_MANAGEMENT', 'Cash Management', 'Handle cash drawer operations',
-    (SELECT group_id FROM permission_groups WHERE name = 'Financial Operations')),
+-- Link variations to milk type options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+(1, (SELECT option_id FROM variant_options WHERE value = 'whole' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'skim' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'oat' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(4, (SELECT option_id FROM variant_options WHERE value = 'whole' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'skim' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'oat' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;
 
--- Staff Management
-('MANAGE_STAFF', 'Manage Staff', 'Hire, fire, and manage employees',
-    (SELECT group_id FROM permission_groups WHERE name = 'Staff Management')),
-('VIEW_STAFF', 'View Staff', 'View employee information',
-    (SELECT group_id FROM permission_groups WHERE name = 'Staff Management')),
-('MANAGE_SCHEDULES', 'Manage Schedules', 'Create and modify work schedules',
-    (SELECT group_id FROM permission_groups WHERE name = 'Staff Management')),
+-- Link variations to strength options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+(1, (SELECT option_id FROM variant_options WHERE value = 'regular' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'extra_shot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'decaf' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(4, (SELECT option_id FROM variant_options WHERE value = 'regular' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'extra_shot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'decaf' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;
 
--- Reporting
-('VIEW_REPORTS', 'View Reports', 'Access to standard reports',
-    (SELECT group_id FROM permission_groups WHERE name = 'Reporting')),
-('EXPORT_DATA', 'Export Data', 'Export data to external formats',
-    (SELECT group_id FROM permission_groups WHERE name = 'Reporting'))
-ON CONFLICT (code) DO NOTHING;
+-- =================================================================
+-- VARIANT SYSTEM HELPER FUNCTIONS
+-- =================================================================
 
--- Sample Roles
-INSERT INTO roles (name, description) VALUES
-('Manager', 'Store manager with full operational access'),
-('Supervisor', 'Shift supervisor with limited management access'),
-('Barista', 'Coffee preparation and basic order processing'),
-('Cashier', 'Order taking and payment processing'),
-('Inventory Clerk', 'Stock management and inventory control'),
-('Administrator', 'System administration and configuration')
+-- Function to get variation options for a product variation
+CREATE OR REPLACE FUNCTION get_variation_options(p_variation_id INT)
+RETURNS TABLE (
+    template_name VARCHAR(50),
+    option_value VARCHAR(50),
+    option_display_name VARCHAR(100)
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        vt.name as template_name,
+        vo.value as option_value,
+        COALESCE(vo.display_name, vo.value) as option_display_name
+    FROM variation_options vop
+    JOIN variant_options vo ON vop.option_id = vo.option_id
+    JOIN variant_templates vt ON vo.template_id = vt.template_id
+    WHERE vop.variation_id = p_variation_id
+    ORDER BY vt.name, vo.display_order;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to create a product variation with options
+CREATE OR REPLACE FUNCTION create_product_variation(
+    p_product_id INT,
+    p_price DECIMAL(10,2),
+    p_cost DECIMAL(10,2) DEFAULT NULL,
+    p_sku VARCHAR(20) DEFAULT NULL,
+    p_option_ids INT[] DEFAULT ARRAY[]::INT[]
+)
+RETURNS INT AS $$
+DECLARE
+    new_variation_id INT;
+    option_id INT;
+BEGIN
+    -- Insert the product variation
+    INSERT INTO product_variations (product_id, price, cost, sku, is_available)
+    VALUES (p_product_id, p_price, p_cost, p_sku, TRUE)
+    RETURNING variation_id INTO new_variation_id;
+    
+    -- Link the variation to options
+    IF array_length(p_option_ids, 1) > 0 THEN
+        FOREACH option_id IN ARRAY p_option_ids
+        LOOP
+            INSERT INTO variation_options (variation_id, option_id)
+            VALUES (new_variation_id, option_id);
+        END LOOP;
+    END IF;
+    
+    RETURN new_variation_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to get product display name with variation options
+CREATE OR REPLACE FUNCTION get_variation_display_name(
+    p_product_name TEXT,
+    p_variation_id INT
+)
+RETURNS TEXT AS $$
+DECLARE
+    variation_options_text TEXT := '';
+    option_text TEXT;
+BEGIN
+    -- Get all options for this variation
+    FOR option_text IN
+        SELECT COALESCE(vo.display_name, vo.value)
+        FROM variation_options vop
+        JOIN variant_options vo ON vop.option_id = vo.option_id
+        JOIN variant_templates vt ON vo.template_id = vt.template_id
+        WHERE vop.variation_id = p_variation_id
+        ORDER BY vt.name, vo.display_order
+    LOOP
+        IF variation_options_text = '' THEN
+            variation_options_text := option_text;
+        ELSE
+            variation_options_text := variation_options_text || ', ' || option_text;
+        END IF;
+    END LOOP;
+    
+    -- Return formatted name
+    IF variation_options_text = '' THEN
+        RETURN p_product_name;
+    ELSE
+        RETURN p_product_name || ' (' || variation_options_text || ')';
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- =================================================================
+-- VARIANT SYSTEM SAMPLE DATA
+-- =================================================================
+
+-- Sample product with variants
+INSERT INTO products (name, description, category_id, has_variants, base_price, is_active) VALUES
+('Latte', 'Rich espresso with steamed milk', 1, true, 4.50, true)
 ON CONFLICT (name) DO NOTHING;
 
--- Sample Role-Permission Assignments
--- Administrator Role (Full Access)
-INSERT INTO role_permissions (role_id, permission_id) 
-SELECT r.role_id, p.permission_id
-FROM roles r, permissions p
-WHERE r.name = 'Administrator'
-ON CONFLICT (role_id, permission_id) DO NOTHING;
+-- Sample product variations with options
+INSERT INTO product_variations (product_id, price, cost, sku, is_available) VALUES
+-- Latte variations
+(1, 4.50, 1.20, 'LAT-SM-HOT', true),
+(1, 5.50, 1.50, 'LAT-MD-HOT', true),
+(1, 6.50, 1.80, 'LAT-LG-HOT', true),
+(1, 4.75, 1.25, 'LAT-SM-ICE', true),
+(1, 5.75, 1.55, 'LAT-MD-ICE', true),
+(1, 6.75, 1.85, 'LAT-LG-ICE', true)
+ON CONFLICT (sku) DO NOTHING;
 
--- Manager Role (Most Permissions)
-INSERT INTO role_permissions (role_id, permission_id) 
-SELECT r.role_id, p.permission_id
-FROM roles r, permissions p
-WHERE r.name = 'Manager' 
-  AND p.code IN (
-    'CREATE_ORDER', 'MODIFY_ORDER', 'CANCEL_ORDER', 'PROCESS_REFUND', 
-    'VIEW_ALL_ORDERS', 'MANAGE_INVENTORY', 'STOCK_ADJUSTMENT', 'VIEW_INVENTORY',
-    'PROCESS_PAYMENT', 'VIEW_FINANCIAL_REPORTS', 'CASH_MANAGEMENT',
-    'VIEW_STAFF', 'MANAGE_SCHEDULES', 'VIEW_REPORTS', 'EXPORT_DATA'
-  )
-ON CONFLICT (role_id, permission_id) DO NOTHING;
+-- Link variations to size options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+-- Hot variations
+(1, (SELECT option_id FROM variant_options WHERE value = 'small' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'medium' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'large' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+-- Iced variations
+(4, (SELECT option_id FROM variant_options WHERE value = 'small' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'medium' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'large' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;
 
--- Supervisor Role (Limited Management)
-INSERT INTO role_permissions (role_id, permission_id) 
-SELECT r.role_id, p.permission_id
-FROM roles r, permissions p
-WHERE r.name = 'Supervisor' 
-  AND p.code IN (
-    'CREATE_ORDER', 'MODIFY_ORDER', 'CANCEL_ORDER', 'VIEW_ALL_ORDERS',
-    'VIEW_INVENTORY', 'PROCESS_PAYMENT', 'CASH_MANAGEMENT',
-    'VIEW_STAFF', 'VIEW_REPORTS'
-  )
-ON CONFLICT (role_id, permission_id) DO NOTHING;
+-- Link variations to temperature options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+(1, (SELECT option_id FROM variant_options WHERE value = 'hot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'hot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'hot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(4, (SELECT option_id FROM variant_options WHERE value = 'iced' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'iced' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'iced' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;
 
--- Barista Role (Order and Basic Operations)
-INSERT INTO role_permissions (role_id, permission_id) 
-SELECT r.role_id, p.permission_id
-FROM roles r, permissions p
-WHERE r.name = 'Barista' 
-  AND p.code IN (
-    'CREATE_ORDER', 'MODIFY_ORDER', 'VIEW_INVENTORY', 'PROCESS_PAYMENT'
-  )
-ON CONFLICT (role_id, permission_id) DO NOTHING;
+-- Link variations to milk type options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+(1, (SELECT option_id FROM variant_options WHERE value = 'whole' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'skim' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'oat' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(4, (SELECT option_id FROM variant_options WHERE value = 'whole' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'skim' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'oat' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;
 
--- Cashier Role (Orders and Payments)
-INSERT INTO role_permissions (role_id, permission_id) 
-SELECT r.role_id, p.permission_id
-FROM roles r, permissions p
-WHERE r.name = 'Cashier' 
-  AND p.code IN (
-    'CREATE_ORDER', 'PROCESS_PAYMENT', 'CASH_MANAGEMENT'
-  )
-ON CONFLICT (role_id, permission_id) DO NOTHING;
+-- Link variations to strength options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+(1, (SELECT option_id FROM variant_options WHERE value = 'regular' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'extra_shot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'decaf' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(4, (SELECT option_id FROM variant_options WHERE value = 'regular' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'extra_shot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'decaf' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;
 
--- Inventory Clerk Role (Stock Management)  
-INSERT INTO role_permissions (role_id, permission_id) 
-SELECT r.role_id, p.permission_id
-FROM roles r, permissions p
-WHERE r.name = 'Inventory Clerk' 
-  AND p.code IN (
-    'MANAGE_INVENTORY', 'STOCK_ADJUSTMENT', 'VIEW_INVENTORY', 'VIEW_REPORTS'
-  )
-ON CONFLICT (role_id, permission_id) DO NOTHING;
+-- =================================================================
+-- VARIANT SYSTEM HELPER FUNCTIONS
+-- =================================================================
+
+-- Function to get variation options for a product variation
+CREATE OR REPLACE FUNCTION get_variation_options(p_variation_id INT)
+RETURNS TABLE (
+    template_name VARCHAR(50),
+    option_value VARCHAR(50),
+    option_display_name VARCHAR(100)
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        vt.name as template_name,
+        vo.value as option_value,
+        COALESCE(vo.display_name, vo.value) as option_display_name
+    FROM variation_options vop
+    JOIN variant_options vo ON vop.option_id = vo.option_id
+    JOIN variant_templates vt ON vo.template_id = vt.template_id
+    WHERE vop.variation_id = p_variation_id
+    ORDER BY vt.name, vo.display_order;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to create a product variation with options
+CREATE OR REPLACE FUNCTION create_product_variation(
+    p_product_id INT,
+    p_price DECIMAL(10,2),
+    p_cost DECIMAL(10,2) DEFAULT NULL,
+    p_sku VARCHAR(20) DEFAULT NULL,
+    p_option_ids INT[] DEFAULT ARRAY[]::INT[]
+)
+RETURNS INT AS $$
+DECLARE
+    new_variation_id INT;
+    option_id INT;
+BEGIN
+    -- Insert the product variation
+    INSERT INTO product_variations (product_id, price, cost, sku, is_available)
+    VALUES (p_product_id, p_price, p_cost, p_sku, TRUE)
+    RETURNING variation_id INTO new_variation_id;
+    
+    -- Link the variation to options
+    IF array_length(p_option_ids, 1) > 0 THEN
+        FOREACH option_id IN ARRAY p_option_ids
+        LOOP
+            INSERT INTO variation_options (variation_id, option_id)
+            VALUES (new_variation_id, option_id);
+               END LOOP;
+    END IF;
+    
+    RETURN new_variation_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to get product display name with variation options
+CREATE OR REPLACE FUNCTION get_variation_display_name(
+    p_product_name TEXT,
+    p_variation_id INT
+)
+RETURNS TEXT AS $$
+DECLARE
+    variation_options_text TEXT := '';
+    option_text TEXT;
+BEGIN
+    -- Get all options for this variation
+    FOR option_text IN
+        SELECT COALESCE(vo.display_name, vo.value)
+        FROM variation_options vop
+        JOIN variant_options vo ON vop.option_id = vo.option_id
+        JOIN variant_templates vt ON vo.template_id = vt.template_id
+        WHERE vop.variation_id = p_variation_id
+        ORDER BY vt.name, vo.display_order
+    LOOP
+        IF variation_options_text = '' THEN
+            variation_options_text := option_text;
+        ELSE
+            variation_options_text := variation_options_text || ', ' || option_text;
+        END IF;
+    END LOOP;
+    
+    -- Return formatted name
+    IF variation_options_text = '' THEN
+        RETURN p_product_name;
+    ELSE
+        RETURN p_product_name || ' (' || variation_options_text || ')';
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- =================================================================
+-- VARIANT SYSTEM SAMPLE DATA
+-- =================================================================
+
+-- Sample product with variants
+INSERT INTO products (name, description, category_id, has_variants, base_price, is_active) VALUES
+('Latte', 'Rich espresso with steamed milk', 1, true, 4.50, true)
+ON CONFLICT (name) DO NOTHING;
+
+-- Sample product variations with options
+INSERT INTO product_variations (product_id, price, cost, sku, is_available) VALUES
+-- Latte variations
+(1, 4.50, 1.20, 'LAT-SM-HOT', true),
+(1, 5.50, 1.50, 'LAT-MD-HOT', true),
+(1, 6.50, 1.80, 'LAT-LG-HOT', true),
+(1, 4.75, 1.25, 'LAT-SM-ICE', true),
+(1, 5.75, 1.55, 'LAT-MD-ICE', true),
+(1, 6.75, 1.85, 'LAT-LG-ICE', true)
+ON CONFLICT (sku) DO NOTHING;
+
+-- Link variations to size options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+-- Hot variations
+(1, (SELECT option_id FROM variant_options WHERE value = 'small' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'medium' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'large' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+-- Iced variations
+(4, (SELECT option_id FROM variant_options WHERE value = 'small' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'medium' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'large' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Size')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;
+
+-- Link variations to temperature options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+(1, (SELECT option_id FROM variant_options WHERE value = 'hot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'hot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'hot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(4, (SELECT option_id FROM variant_options WHERE value = 'iced' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'iced' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'iced' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Temperature')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;
+
+-- Link variations to milk type options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+(1, (SELECT option_id FROM variant_options WHERE value = 'whole' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'skim' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'oat' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(4, (SELECT option_id FROM variant_options WHERE value = 'whole' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'skim' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'oat' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Milk Type')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;
+
+-- Link variations to strength options
+INSERT INTO variation_options (variation_id, option_id) VALUES
+(1, (SELECT option_id FROM variant_options WHERE value = 'regular' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(2, (SELECT option_id FROM variant_options WHERE value = 'extra_shot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(3, (SELECT option_id FROM variant_options WHERE value = 'decaf' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(4, (SELECT option_id FROM variant_options WHERE value = 'regular' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(5, (SELECT option_id FROM variant_options WHERE value = 'extra_shot' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength'))),
+(6, (SELECT option_id FROM variant_options WHERE value = 'decaf' AND template_id = (SELECT template_id FROM variant_templates WHERE name = 'Strength')))
+ON CONFLICT (variation_id, option_id) DO NOTHING;

@@ -181,10 +181,13 @@ CREATE TABLE IF NOT EXISTS customers (
     phone VARCHAR(20) UNIQUE,            
     name VARCHAR(100),
     email VARCHAR(100),
+    member_type VARCHAR(20) DEFAULT 'guest', -- e.g., "guest", "member"
+    member_since DATE,
     loyalty_points INT DEFAULT 0,
     visit_count INT DEFAULT 0,
     last_visit DATE,
     primary_branch_id INT,               -- Customer's preferred branch
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (primary_branch_id) REFERENCES branches(branch_id)
 );
 
@@ -265,10 +268,21 @@ CREATE TABLE IF NOT EXISTS variation_options (
 CREATE TABLE IF NOT EXISTS orders (
     order_id SERIAL PRIMARY KEY,
     order_number VARCHAR(20) NOT NULL UNIQUE, -- "CAFE-2025-1001"
-    employee_id INT NOT NULL,            
-    customer_id INT,                     -- Loyalty program link
-    branch_id INT NOT NULL DEFAULT 1,    -- Branch where order was placed
+    employee_id INT NOT NULL,   
+    branch_id INT NOT NULL,    -- Branch where order was placed         
     order_time TIMESTAMP NOT NULL,
+
+    -- Customer Identification (flexible)
+    customer_id INT,                     -- Loyalty program link
+    customer_type ENUM('guest', 'member') DEFAULT 'guest', -- e.g., "guest", "member"
+    guest_info JSONB,                    -- Additional info for guests (e.g., name, phone)
+
+    -- Loyalty Integration
+    loyalty_card_number VARCHAR(50),     -- e.g., "LC123456"
+    loyalty_points_earned INT DEFAULT 0,
+    loyalty_points_redeemed INT DEFAULT 0,
+
+    -- Financial Columns
     currency_code CHAR(3) NOT NULL DEFAULT 'USD' CHECK (currency_code ~ '^[A-Z]{3}$'),
     exchange_rate DECIMAL(15,6) DEFAULT 1.0, -- Rate used for this order
     subtotal DECIMAL(12,2) NOT NULL,     -- In order currency
@@ -277,8 +291,19 @@ CREATE TABLE IF NOT EXISTS orders (
     tip_amount DECIMAL(10,2) DEFAULT 0.00, -- In order currency
     total_amount DECIMAL(12,2) NOT NULL, -- Final amount in order currency
     base_total_amount DECIMAL(12,2) NOT NULL, -- Total in base currency (USD)
+
+     -- Status Tracking
     status order_status DEFAULT 'open',
+
+    -- Order Notes
     notes TEXT,
+
+    -- Ensure either customer_id or guest_info exists
+    CONSTRAINT chk_customer_identification CHECK (
+        customer_id IS NOT NULL OR guest_info IS NOT NULL
+    ),
+
+    -- Foreign Keys
     FOREIGN KEY (employee_id) REFERENCES employees(employee_id),
     FOREIGN KEY (customer_id) REFERENCES customers(customer_id),
     FOREIGN KEY (branch_id) REFERENCES branches(branch_id)
@@ -906,6 +931,19 @@ DO $$ BEGIN CREATE INDEX idx_permissions_code_lookup ON permissions(code, is_act
 -- Financial reporting optimization
 DO $$ BEGIN CREATE INDEX idx_orders_branch_currency_date ON orders(branch_id, currency_code, DATE(order_time), status) WHERE status = 'paid'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 DO $$ BEGIN CREATE INDEX idx_order_payments_branch_time ON order_payments(order_id, payment_time DESC, status) WHERE status = 'completed'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Guest customer lookup indexes (CRITICAL for non-member customer management)
+DO $$ BEGIN CREATE INDEX idx_orders_guest_phone ON orders USING gin((guest_info->>'phone')) WHERE customer_id IS NULL AND guest_info ? 'phone'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_guest_email ON orders USING gin((guest_info->>'email')) WHERE customer_id IS NULL AND guest_info ? 'email'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_guest_name ON orders USING gin(to_tsvector('english', guest_info->>'name')) WHERE customer_id IS NULL AND guest_info ? 'name'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_guest_lookup ON orders((guest_info->>'phone'), (guest_info->>'email'), customer_type) WHERE customer_type = 'guest'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_customer_type ON orders(customer_type, order_time DESC); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_loyalty_card ON orders(loyalty_card_number) WHERE loyalty_card_number IS NOT NULL; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Guest analytics and conversion tracking indexes
+DO $$ BEGIN CREATE INDEX idx_orders_guest_frequency ON orders((guest_info->>'phone'), order_time DESC) WHERE customer_id IS NULL AND guest_info ? 'phone'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_guest_value ON orders((guest_info->>'phone'), total_amount DESC, order_time DESC) WHERE customer_id IS NULL AND guest_info ? 'phone'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_member_vs_guest ON orders(customer_type, status, DATE(order_time), total_amount) WHERE status = 'paid'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
 -- =================================================================
 -- REDUNDANCY ANALYSIS & OPTIMIZATION NOTES
