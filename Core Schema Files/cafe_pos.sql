@@ -346,8 +346,18 @@ CREATE TABLE IF NOT EXISTS order_items (
     )
 );
 
+-- 18. Table: member_benefits (Flexible Member Benefits)
+CREATE TABLE member_benefits (
+    benefit_id INT PRIMARY KEY AUTO_INCREMENT,
+    member_type ENUM('guest', 'member') NOT NULL,
+    benefit_type ENUM('discount', 'free_item', 'point_multiplier') NOT NULL,
+    value DECIMAL(8,2),                  -- Discount % or points multiplier
+    product_id INT,                       -- For free items
+    FOREIGN KEY (product_id) REFERENCES products(product_id)
+);
+
 -- Inventory & Recipe Tables
--- 18. Table: ingredients
+-- 19. Table: ingredients
 CREATE TABLE IF NOT EXISTS ingredients (
     ingredient_id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL UNIQUE,  -- e.g., "Coffee Beans", "Oat Milk"
@@ -357,7 +367,7 @@ CREATE TABLE IF NOT EXISTS ingredients (
     supplier VARCHAR(100)
 );
 
--- 19. Table: recipes
+-- 20. Table: recipes
 CREATE TABLE IF NOT EXISTS recipes (
     recipe_id SERIAL PRIMARY KEY,
     variation_id INT NOT NULL,
@@ -368,7 +378,7 @@ CREATE TABLE IF NOT EXISTS recipes (
     UNIQUE (variation_id, ingredient_id)
 );
 
--- 20. Table: inventory_transactions
+-- 21. Table: inventory_transactions
 CREATE TABLE IF NOT EXISTS inventory_transactions (
     transaction_id SERIAL PRIMARY KEY,
     ingredient_id INT NOT NULL,
@@ -384,7 +394,7 @@ CREATE TABLE IF NOT EXISTS inventory_transactions (
 );
 
 -- Multi-Branch Inventory Management Tables
--- 21. Table: central_inventory (for centralized inventory strategy)
+-- 22. Table: central_inventory (for centralized inventory strategy)
 CREATE TABLE IF NOT EXISTS central_inventory (
     central_inventory_id SERIAL PRIMARY KEY,
     ingredient_id INT NOT NULL,
@@ -402,7 +412,7 @@ CREATE TABLE IF NOT EXISTS central_inventory (
     UNIQUE (ingredient_id)
 );
 
--- 22. Table: branch_inventory (branch-specific stock levels)
+-- 23. Table: branch_inventory (branch-specific stock levels)
 CREATE TABLE IF NOT EXISTS branch_inventory (
     branch_inventory_id SERIAL PRIMARY KEY,
     branch_id INT NOT NULL,
@@ -421,7 +431,7 @@ CREATE TABLE IF NOT EXISTS branch_inventory (
     UNIQUE (branch_id, ingredient_id)
 );
 
--- 23. Table: inventory_transfers (inter-branch transfers)
+-- 24. Table: inventory_transfers (inter-branch transfers)
 CREATE TABLE IF NOT EXISTS inventory_transfers (
     transfer_id SERIAL PRIMARY KEY,
     transfer_number VARCHAR(20) NOT NULL UNIQUE, -- e.g., 'TRNF-2025-001'
@@ -451,7 +461,7 @@ CREATE TABLE IF NOT EXISTS inventory_transfers (
 );
 
 -- Multi-Currency Support Tables
--- 24. Table: currencies
+-- 25. Table: currencies
 CREATE TABLE IF NOT EXISTS currencies (
     currency_id SERIAL PRIMARY KEY,
     code CHAR(3) NOT NULL UNIQUE CHECK (code ~ '^[A-Z]{3}$'),
@@ -462,7 +472,7 @@ CREATE TABLE IF NOT EXISTS currencies (
     is_active BOOLEAN DEFAULT TRUE
 );
 
--- 25. Table: exchange_rates
+-- 26. Table: exchange_rates
 CREATE TABLE IF NOT EXISTS exchange_rates (
     rate_id SERIAL PRIMARY KEY,
     from_currency CHAR(3) NOT NULL CHECK (from_currency ~ '^[A-Z]{3}$'),
@@ -474,7 +484,7 @@ CREATE TABLE IF NOT EXISTS exchange_rates (
     UNIQUE (from_currency, to_currency, effective_date)
 );
 
--- 26. Table: exchange_rate_history
+-- 27. Table: exchange_rate_history
 CREATE TABLE IF NOT EXISTS exchange_rate_history (
     history_id SERIAL PRIMARY KEY,
     rate_id INT NOT NULL,
@@ -486,14 +496,14 @@ CREATE TABLE IF NOT EXISTS exchange_rate_history (
     FOREIGN KEY (rate_id) REFERENCES exchange_rates(rate_id)
 );
 
--- 27. Table: permission_groups
+-- 28. Table: permission_groups
 CREATE TABLE IF NOT EXISTS permission_groups (
     group_id SERIAL PRIMARY KEY,
     name VARCHAR(50) NOT NULL UNIQUE,   -- e.g., "Admin", "Staff"
     description TEXT
 );
 
--- 28. Table: permissions
+-- 29. Table: permissions
 CREATE TABLE IF NOT EXISTS permissions (
     permission_id SERIAL PRIMARY KEY,
     code VARCHAR(50) NOT NULL UNIQUE,  -- e.g., "CREATE_ORDER", "PROCESS_REFUND"
@@ -505,7 +515,7 @@ CREATE TABLE IF NOT EXISTS permissions (
     FOREIGN KEY (group_id) REFERENCES permission_groups(group_id)
 );
 
--- 29. Table: role_permissions
+--30. Table: role_permissions
 CREATE TABLE IF NOT EXISTS role_permissions (
     role_permission_id SERIAL PRIMARY KEY,
     role_id INT NOT NULL,
@@ -518,7 +528,7 @@ CREATE TABLE IF NOT EXISTS role_permissions (
     UNIQUE (role_id, permission_id)
 );
 
--- 30. Table: employee_roles (Many-to-Many: Employee to Role)
+-- 31. Table: employee_roles (Many-to-Many: Employee to Role)
 CREATE TABLE IF NOT EXISTS employee_roles (
     employee_role_id SERIAL PRIMARY KEY,
     employee_id INT NOT NULL,
@@ -847,6 +857,18 @@ DO $$ BEGIN CREATE INDEX idx_customers_phone_lookup ON customers(phone) WHERE ph
 DO $$ BEGIN CREATE INDEX idx_customers_email_lookup ON customers(email) WHERE email IS NOT NULL; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 DO $$ BEGIN CREATE INDEX idx_customers_loyalty_points ON customers(loyalty_points DESC) WHERE loyalty_points > 0; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 DO $$ BEGIN CREATE INDEX idx_customers_last_visit ON customers(last_visit DESC) WHERE last_visit IS NOT NULL; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Member Benefits Optimization (CRITICAL for loyalty program performance)
+DO $$ BEGIN CREATE INDEX idx_member_benefits_type ON member_benefits(member_type, benefit_type); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_member_benefits_product ON member_benefits(product_id, benefit_type) WHERE product_id IS NOT NULL; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_member_benefits_discount ON member_benefits(member_type, value) WHERE benefit_type = 'discount'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_member_benefits_points ON member_benefits(member_type, value) WHERE benefit_type = 'point_multiplier'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Member Benefits in Orders (loyalty tracking)
+DO $$ BEGIN CREATE INDEX idx_orders_loyalty_tracking ON orders(customer_type, loyalty_points_earned, loyalty_points_redeemed) WHERE customer_type = 'member'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_loyalty_card ON orders(loyalty_card_number) WHERE loyalty_card_number IS NOT NULL; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_member_points ON orders(customer_id, loyalty_points_earned DESC) WHERE customer_id IS NOT NULL AND loyalty_points_earned > 0; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_points_redemption ON orders(customer_id, loyalty_points_redeemed DESC, order_time DESC) WHERE loyalty_points_redeemed > 0; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
 -- Employee Operations
 DO $$ BEGIN CREATE INDEX idx_employees_pin_lookup ON employees(pin); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
