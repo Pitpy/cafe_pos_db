@@ -870,130 +870,96 @@ DO $$ BEGIN CREATE INDEX idx_inventory_usage ON inventory_transactions(ingredien
 DO $$ BEGIN CREATE INDEX idx_customer_loyalty ON orders(customer_id, status, order_time, total_amount) WHERE customer_id IS NOT NULL; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
 -- =================================================================
--- PERFORMANCE VIEWS FOR COMMON OPERATIONS (with conflict prevention)
+-- MISSING CRITICAL INDEXES FOR POS PERFORMANCE
 -- =================================================================
 
--- Daily Sales Summary (Optimized)
-DROP MATERIALIZED VIEW IF EXISTS daily_sales_summary CASCADE;
-CREATE MATERIALIZED VIEW daily_sales_summary AS
-SELECT 
-    DATE(o.order_time) as sale_date,
-    o.currency_code,
-    COUNT(*) as order_count,
-    SUM(o.total_amount) as total_revenue,
-    SUM(o.base_total_amount) as total_revenue_usd,
-    AVG(o.total_amount) as avg_order_value,
-    SUM(o.tax_amount) as total_tax
-FROM orders o
-WHERE o.status = 'paid' 
-    AND o.order_time >= CURRENT_DATE - INTERVAL '30 days'
-GROUP BY DATE(o.order_time), o.currency_code;
+-- Branch-related indexes (MISSING - Critical for multi-branch)
+DO $$ BEGIN CREATE INDEX idx_orders_branch_time ON orders(branch_id, order_time DESC); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_branch_status ON orders(branch_id, status, order_time DESC); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_inventory_transactions_branch_time ON inventory_transactions(branch_id, transaction_time DESC); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_employees_branch_active ON employees(branch_id, is_active); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_employee_branches_active ON employee_branches(branch_id, is_active); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
-DO $$ BEGIN CREATE UNIQUE INDEX idx_daily_sales_summary ON daily_sales_summary(sale_date, currency_code); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+-- Variant system indexes (MISSING - Critical for product variations)
+DO $$ BEGIN CREATE INDEX idx_variation_options_variation ON variation_options(variation_id); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_variation_options_option ON variation_options(option_id); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_variant_options_template ON variant_options(template_id, display_order); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_variant_templates_active ON variant_templates(is_active, name); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
--- Popular Products View (Optimized)
-DROP MATERIALIZED VIEW IF EXISTS popular_products_summary CASCADE;
-CREATE MATERIALIZED VIEW popular_products_summary AS
-SELECT 
-    pv.variation_id,
-    p.name as product_name,
-    pv.size,
-    pv.type,
-    pv.sku,
-    COUNT(oi.order_item_id) as order_count,
-    SUM(oi.quantity) as total_quantity_sold,
-    SUM(oi.quantity * oi.base_unit_price) as total_revenue_usd,
-    AVG(oi.display_unit_price) as avg_selling_price
-FROM order_items oi
-JOIN product_variations pv ON oi.variation_id = pv.variation_id
-JOIN products p ON pv.product_id = p.product_id
-JOIN orders o ON oi.order_id = o.order_id
-WHERE o.status = 'paid'
-    AND o.order_time >= CURRENT_DATE - INTERVAL '30 days'
-GROUP BY pv.variation_id, p.name, pv.size, pv.type, pv.sku;
+-- Product pricing indexes (CRITICAL for menu display)
+DO $$ BEGIN CREATE INDEX idx_product_variations_price_range ON product_variations(price, is_available) WHERE is_available = true; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_products_category_price ON products(category_id, base_price, is_active) WHERE is_active = true; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
-DO $$ BEGIN CREATE UNIQUE INDEX idx_popular_products_summary ON popular_products_summary(variation_id); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+-- Real-time inventory tracking (CRITICAL for stock management)
+DO $$ BEGIN CREATE INDEX idx_recipes_bulk_lookup ON recipes(ingredient_id, quantity); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_ingredients_supplier_stock ON ingredients(supplier, current_stock, reorder_level); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
--- Low Stock Alert View
-CREATE OR REPLACE VIEW low_stock_alert AS
-SELECT 
-    i.ingredient_id,
-    i.name,
-    i.current_stock,
-    i.reorder_level,
-    i.unit,
-    (i.current_stock - i.reorder_level) as stock_difference,
-    CASE 
-        WHEN i.current_stock <= 0 THEN 'OUT_OF_STOCK'
-        WHEN i.current_stock <= i.reorder_level * 0.5 THEN 'CRITICAL'
-        WHEN i.current_stock <= i.reorder_level THEN 'LOW'
-        ELSE 'OK'
-    END as stock_status
-FROM ingredients i
-WHERE i.reorder_level IS NOT NULL
-ORDER BY stock_difference ASC;
+-- Order processing optimization (CRITICAL for POS speed)
+DO $$ BEGIN CREATE INDEX idx_order_items_modifiers ON order_items USING gin(modifiers); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_orders_employee_branch ON orders(employee_id, branch_id, order_time DESC); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Permission system performance (Important for security checks)
+DO $$ BEGIN CREATE INDEX idx_employee_roles_active ON employee_roles(employee_id, is_active); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_role_permissions_lookup ON role_permissions(role_id, permission_id); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_permissions_code_lookup ON permissions(code, is_active) WHERE is_active = true; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Financial reporting optimization
+DO $$ BEGIN CREATE INDEX idx_orders_branch_currency_date ON orders(branch_id, currency_code, DATE(order_time), status) WHERE status = 'paid'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+DO $$ BEGIN CREATE INDEX idx_order_payments_branch_time ON order_payments(order_id, payment_time DESC, status) WHERE status = 'completed'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
 -- =================================================================
--- MAINTENANCE PROCEDURES
+-- REDUNDANCY ANALYSIS & OPTIMIZATION NOTES
 -- =================================================================
 
--- Refresh materialized views (run daily)
-CREATE OR REPLACE FUNCTION refresh_performance_views() 
-RETURNS void AS $$
-BEGIN
-    REFRESH MATERIALIZED VIEW CONCURRENTLY daily_sales_summary;
-    REFRESH MATERIALIZED VIEW CONCURRENTLY popular_products_summary;
-END;
-$$ LANGUAGE plpgsql;
+-- REDUNDANT INDEXES IDENTIFIED:
+-- 1. idx_orders_time_status vs idx_orders_recent - Consider dropping idx_orders_time_status
+-- 2. idx_orders_status_time has similar coverage to idx_orders_time_status
+-- 3. Multiple payment time indexes could be consolidated
 
--- Clean old data procedure
-CREATE OR REPLACE FUNCTION cleanup_old_data(days_to_keep INT DEFAULT 365)
-RETURNS void AS $$
-BEGIN
-    -- Archive old exchange rates (keep only last rate per currency pair)
-    DELETE FROM exchange_rates 
-    WHERE effective_date < CURRENT_DATE - INTERVAL '30 days'
-    AND rate_id NOT IN (
-        SELECT DISTINCT ON (from_currency, to_currency) rate_id
-        FROM exchange_rates
-        ORDER BY from_currency, to_currency, effective_date DESC
-    );
-    
-    -- Clean old inventory transactions (keep 1 year)
-    DELETE FROM inventory_transactions 
-    WHERE transaction_time < CURRENT_DATE - (days_to_keep || ' days')::INTERVAL;
-    
-    RAISE NOTICE 'Cleanup completed for data older than % days', days_to_keep;
-END;
-$$ LANGUAGE plpgsql;
+-- MISSING COMPOSITE INDEXES FOR COMMON POS QUERIES:
+-- These indexes support the most frequent POS operations
+
+-- Menu loading with branch context
+DO $$ BEGIN CREATE INDEX idx_menu_display ON product_variations(product_id, branch_id, is_available, price) WHERE is_available = true; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Order completion workflow
+DO $$ BEGIN CREATE INDEX idx_order_completion ON orders(status, order_time DESC, branch_id, total_amount) WHERE status IN ('open', 'paid'); EXCEPTION WHEN duplicate_table THEN NULL; END $$;
+
+-- Inventory depletion tracking
+DO $$ BEGIN CREATE INDEX idx_inventory_depletion ON inventory_transactions(ingredient_id, branch_id, transaction_type, transaction_time DESC) WHERE transaction_type = 'sale'; EXCEPTION WHEN duplicate_table THEN NULL; END $$;
 
 -- =================================================================
--- PERFORMANCE MONITORING QUERIES
+-- INDEX USAGE MONITORING QUERIES (Commented for reference)
 -- =================================================================
 
--- Check index usage
 /*
+-- Monitor index usage efficiency
 SELECT 
-    schemaname,
-    tablename,
-    indexname,
-    idx_tup_read,
-    idx_tup_fetch,
-    idx_scan
+    schemaname, tablename, indexname, 
+    idx_scan, idx_tup_read, idx_tup_fetch,
+    idx_tup_read::float / NULLIF(idx_scan, 0) as avg_tuples_per_scan
 FROM pg_stat_user_indexes 
+WHERE schemaname = 'public'
 ORDER BY idx_scan DESC;
-*/
 
--- Check slow queries
-/*
+-- Find unused indexes
+SELECT schemaname, tablename, indexname
+FROM pg_stat_user_indexes 
+WHERE idx_scan = 0 AND indexname NOT LIKE '%_pkey%'
+ORDER BY schemaname, tablename;
+
+-- Check for duplicate/overlapping indexes
 SELECT 
-    query,
-    mean_exec_time,
-    calls,
-    total_exec_time
-FROM pg_stat_statements 
-ORDER BY mean_exec_time DESC 
-LIMIT 10;
+    t.schemaname, t.tablename, 
+    i1.indexname as index1, i2.indexname as index2,
+    i1.indexdef, i2.indexdef
+FROM pg_indexes i1
+JOIN pg_indexes i2 ON i1.tablename = i2.tablename 
+    AND i1.indexname < i2.indexname
+JOIN pg_tables t ON i1.tablename = t.tablename
+WHERE t.schemaname = 'public'
+    AND i1.indexdef SIMILAR TO i2.indexdef
+ORDER BY t.tablename;
 */
 
 -- Sugar Level Management System
@@ -1359,43 +1325,6 @@ $$ LANGUAGE plpgsql;
 -- VARIANT SYSTEM SAMPLE DATA
 -- =================================================================
 
--- Sample variant templates
-INSERT INTO variant_templates (name, description) VALUES
-('Size', 'Coffee serving sizes'),
-('Temperature', 'Drink temperature options'),
-('Milk Type', 'Milk alternatives'),
-('Strength', 'Coffee strength levels')
-ON CONFLICT (name) DO NOTHING;
-
--- Sample variant options
-INSERT INTO variant_options (template_id, value, display_name, display_order) VALUES
--- Size options
-((SELECT template_id FROM variant_templates WHERE name = 'Size'), 'small', 'Small (8oz)', 1),
-((SELECT template_id FROM variant_templates WHERE name = 'Size'), 'medium', 'Medium (12oz)', 2),
-((SELECT template_id FROM variant_templates WHERE name = 'Size'), 'large', 'Large (16oz)', 3),
-
--- Temperature options
-((SELECT template_id FROM variant_templates WHERE name = 'Temperature'), 'hot', 'Hot', 1),
-((SELECT template_id FROM variant_templates WHERE name = 'Temperature'), 'iced', 'Iced', 2),
-((SELECT template_id FROM variant_templates WHERE name = 'Temperature'), 'blended', 'Blended', 3),
-
--- Milk type options
-((SELECT template_id FROM variant_templates WHERE name = 'Milk Type'), 'whole', 'Whole Milk', 1),
-((SELECT template_id FROM variant_templates WHERE name = 'Milk Type'), 'skim', 'Skim Milk', 2),
-((SELECT template_id FROM variant_templates WHERE name = 'Milk Type'), 'oat', 'Oat Milk', 3),
-((SELECT template_id FROM variant_templates WHERE name = 'Milk Type'), 'almond', 'Almond Milk', 4),
-((SELECT template_id FROM variant_templates WHERE name = 'Milk Type'), 'soy', 'Soy Milk', 5),
-
--- Strength options
-((SELECT template_id FROM variant_templates WHERE name = 'Strength'), 'regular', 'Regular', 1),
-((SELECT template_id FROM variant_templates WHERE name = 'Strength'), 'extra_shot', 'Extra Shot', 2),
-((SELECT template_id FROM variant_templates WHERE name = 'Strength'), 'decaf', 'Decaffeinated', 3)
-ON CONFLICT (template_id, value) DO NOTHING;
-
--- =================================================================
--- SAMPLE DATA FOR VARIANT SYSTEM
--- =================================================================
-
 -- Sample product with variants
 INSERT INTO products (name, description, category_id, has_variants, base_price, is_active) VALUES
 ('Latte', 'Rich espresso with steamed milk', 1, true, 4.50, true)
@@ -1656,7 +1585,7 @@ BEGIN
         LOOP
             INSERT INTO variation_options (variation_id, option_id)
             VALUES (new_variation_id, option_id);
-        END LOOP;
+               END LOOP;
     END IF;
     
     RETURN new_variation_id;
